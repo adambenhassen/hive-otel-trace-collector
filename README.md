@@ -49,9 +49,9 @@ Environment variables:
 ## Architecture
 
 ```
-Request → Auth → Parser → Batcher → ClickHouse
-                             ↓
-                        Disk Buffer (overflow)
+Request → Auth → Parser → Batcher → Workers → ClickHouse
+                             ↓         ↑
+                        Disk Buffer ───┘
 ```
 
 - **Batcher**: Accumulates spans and flushes to ClickHouse in configurable batch sizes
