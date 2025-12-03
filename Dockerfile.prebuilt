@@ -1,0 +1,16 @@
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY target/${TARGETARCH}/hive-otel-trace-collector /usr/local/bin/
+
+RUN mkdir -p /var/lib/rust-collector
+
+ENV PORT=4318
+ENV BUFFER_DIR=/var/lib/rust-collector
+
+EXPOSE 4318
+
+CMD ["hive-otel-trace-collector"]

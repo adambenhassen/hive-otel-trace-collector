@@ -1,0 +1,487 @@
+use crate::proto::span::Span;
+use memmap2::{MmapMut, MmapOptions};
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use thiserror::Error;
+use tracing::{error, info, warn};
+
+const MAGIC: u32 = 0x48495645; // "HIVE"
+const VERSION: u32 = 1;
+const HEADER_SIZE: usize = 64;
+const ENTRY_HEADER_SIZE: usize = 16;
+
+#[derive(Error, Debug)]
+pub enum BufferError {
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Buffer full")]
+    BufferFull,
+}
+
+#[derive(Debug, Clone)]
+pub struct BufferConfig {
+    pub dir: PathBuf,
+    pub max_size: u64,
+    pub segment_size: usize,
+}
+
+impl Default for BufferConfig {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("/var/lib/otel-collector/buffer"),
+            max_size: 10 * 1024 * 1024 * 1024, // 10GB
+            segment_size: 64 * 1024 * 1024,    // 64MB
+        }
+    }
+}
+
+impl BufferConfig {
+    pub fn from_env() -> Self {
+        Self {
+            dir: std::env::var("BUFFER_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/var/lib/otel-collector/buffer")),
+            max_size: std::env::var("BUFFER_MAX_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10 * 1024 * 1024 * 1024),
+            segment_size: std::env::var("BUFFER_SEGMENT_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(64 * 1024 * 1024),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BufferedBatch {
+    pub rows: Vec<Span>,
+    pub created_at_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct SegmentHeader {
+    magic: u32,
+    version: u32,
+    write_offset: u64,
+    read_offset: u64,
+    entry_count: u64,
+    _reserved: [u8; 32],
+}
+
+impl SegmentHeader {
+    fn new() -> Self {
+        Self {
+            magic: MAGIC,
+            version: VERSION,
+            write_offset: HEADER_SIZE as u64,
+            read_offset: HEADER_SIZE as u64,
+            entry_count: 0,
+            _reserved: [0; 32],
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.magic == MAGIC && self.version == VERSION
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct EntryHeader {
+    length: u32,
+    crc: u32,
+    batch_count: u32,
+    _reserved: u32,
+}
+
+pub struct MmapRingBuffer {
+    config: BufferConfig,
+    current_segment: Mutex<Option<ActiveSegment>>,
+    total_bytes: AtomicU64,
+    total_entries: AtomicU64,
+}
+
+struct ActiveSegment {
+    #[allow(dead_code)] // Kept to hold fd open while mmap is active
+    file: File,
+    mmap: MmapMut,
+    write_offset: usize,
+    entry_count: usize,
+}
+
+impl MmapRingBuffer {
+    pub fn new(config: BufferConfig) -> Result<Self, BufferError> {
+        std::fs::create_dir_all(&config.dir)?;
+
+        let buffer = Self {
+            config,
+            current_segment: Mutex::new(None),
+            total_bytes: AtomicU64::new(0),
+            total_entries: AtomicU64::new(0),
+        };
+
+        buffer.recover()?;
+        Ok(buffer)
+    }
+
+    /// Recover state from existing segment files
+    fn recover(&self) -> Result<(), BufferError> {
+        let entries = std::fs::read_dir(&self.config.dir)?;
+        let mut total_bytes = 0u64;
+        let mut total_entries = 0u64;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "seg").unwrap_or(false) {
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    total_bytes += metadata.len();
+                }
+                // Count entries by reading header
+                if let Ok(file) = File::open(&path) {
+                    if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
+                        if mmap.len() >= HEADER_SIZE {
+                            let header =
+                                unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
+                            if header.is_valid() {
+                                total_entries += header.entry_count;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.total_bytes.store(total_bytes, Ordering::SeqCst);
+        self.total_entries.store(total_entries, Ordering::SeqCst);
+
+        if total_bytes > 0 {
+            info!(
+                bytes = total_bytes,
+                entries = total_entries,
+                "Recovered disk buffer state"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn get_or_create_segment(&self) -> Result<(), BufferError> {
+        let mut guard = self.current_segment.lock().unwrap();
+
+        if guard.is_none() || self.needs_rotation(&guard) {
+            // Create new segment
+            let segment_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = self.config.dir.join(format!("{}.seg", segment_id));
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&path)?;
+
+            file.set_len(self.config.segment_size as u64)?;
+
+            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+
+            // Write header
+            let header = SegmentHeader::new();
+            unsafe {
+                std::ptr::write(mmap.as_mut_ptr() as *mut SegmentHeader, header);
+            }
+            mmap.flush()?;
+
+            info!(path = %path.display(), "Created new buffer segment");
+
+            *guard = Some(ActiveSegment {
+                file,
+                mmap,
+                write_offset: HEADER_SIZE,
+                entry_count: 0,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn needs_rotation(&self, segment: &Option<ActiveSegment>) -> bool {
+        segment
+            .as_ref()
+            .map(|s| s.write_offset + 1024 * 1024 > self.config.segment_size) // 1MB margin
+            .unwrap_or(true)
+    }
+
+    pub fn write_batch(&self, batch: BufferedBatch) -> Result<(), BufferError> {
+        if self.total_bytes.load(Ordering::Relaxed) >= self.config.max_size {
+            return Err(BufferError::BufferFull);
+        }
+
+        let data =
+            bincode::serialize(&batch).map_err(|e| BufferError::Serialization(e.to_string()))?;
+
+        let entry_size = ENTRY_HEADER_SIZE + data.len();
+
+        self.get_or_create_segment()?;
+
+        let mut guard = self.current_segment.lock().unwrap();
+        let segment = guard.as_mut().ok_or(BufferError::Io(io::Error::new(
+            io::ErrorKind::Other,
+            "No active segment",
+        )))?;
+
+        // Check if entry fits in current segment
+        if segment.write_offset + entry_size > self.config.segment_size {
+            drop(guard);
+            // Force rotation by clearing current segment
+            self.current_segment.lock().unwrap().take();
+            self.get_or_create_segment()?;
+            guard = self.current_segment.lock().unwrap();
+        }
+
+        let segment = guard.as_mut().ok_or(BufferError::Io(io::Error::new(
+            io::ErrorKind::Other,
+            "No active segment after rotation",
+        )))?;
+
+        // Write entry header
+        let crc = crc32fast::hash(&data);
+        let entry_header = EntryHeader {
+            length: data.len() as u32,
+            crc,
+            batch_count: batch.rows.len() as u32,
+            _reserved: 0,
+        };
+
+        let header_ptr = segment.mmap[segment.write_offset..].as_mut_ptr() as *mut EntryHeader;
+        unsafe {
+            std::ptr::write(header_ptr, entry_header);
+        }
+
+        // Write data
+        let data_offset = segment.write_offset + ENTRY_HEADER_SIZE;
+        segment.mmap[data_offset..data_offset + data.len()].copy_from_slice(&data);
+
+        segment.write_offset += entry_size;
+        segment.entry_count += 1;
+
+        // Update header
+        let header = unsafe { &mut *(segment.mmap.as_mut_ptr() as *mut SegmentHeader) };
+        header.write_offset = segment.write_offset as u64;
+        header.entry_count = segment.entry_count as u64;
+
+        // Async flush (don't block)
+        if let Err(e) = segment.mmap.flush_async() {
+            warn!(error = %e, "Async mmap flush failed, data may not be durable");
+        }
+
+        self.total_bytes
+            .fetch_add(entry_size as u64, Ordering::Relaxed);
+        self.total_entries.fetch_add(1, Ordering::Relaxed);
+
+        info!(
+            bytes = entry_size,
+            rows = batch.rows.len(),
+            "Wrote batch to disk buffer"
+        );
+
+        Ok(())
+    }
+
+    /// Read the next batch from the buffer (for draining)
+    pub fn read_batch(&self) -> Result<Option<BufferedBatch>, BufferError> {
+        // Find segments with unread data
+        let mut segments: Vec<PathBuf> = std::fs::read_dir(&self.config.dir)?
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().map(|e| e == "seg").unwrap_or(false) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // segments.sort(); // Process oldest first
+
+        for path in segments {
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
+            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+
+            if mmap.len() < HEADER_SIZE {
+                continue;
+            }
+
+            let header = unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
+
+            if !header.is_valid() {
+                warn!(path = %path.display(), "Invalid segment header, removing");
+                std::fs::remove_file(&path)?;
+                continue;
+            }
+
+            let read_offset = header.read_offset as usize;
+            let write_offset = header.write_offset as usize;
+
+            if read_offset >= write_offset {
+                // Segment fully read, remove it
+                info!(path = %path.display(), "Segment fully read, removing");
+                drop(mmap);
+                drop(file);
+                std::fs::remove_file(&path)?;
+                continue;
+            }
+
+            // Read entry header
+            if read_offset + ENTRY_HEADER_SIZE > mmap.len() {
+                continue;
+            }
+
+            let entry_header =
+                unsafe { std::ptr::read(mmap[read_offset..].as_ptr() as *const EntryHeader) };
+
+            let data_offset = read_offset + ENTRY_HEADER_SIZE;
+            let data_end = data_offset + entry_header.length as usize;
+
+            if data_end > mmap.len() {
+                warn!(path = %path.display(), "Truncated entry, skipping");
+                continue;
+            }
+
+            let data = &mmap[data_offset..data_end];
+
+            // verify CRC
+            let crc = crc32fast::hash(data);
+            if crc != entry_header.crc {
+                warn!(
+                    path = %path.display(),
+                    expected = entry_header.crc,
+                    actual = crc,
+                    "CRC mismatch, skipping entry"
+                );
+                // Update read offset to skip corrupted entry
+                let new_read_offset = data_end;
+                let header_mut = unsafe { &mut *(mmap.as_mut_ptr() as *mut SegmentHeader) };
+                header_mut.read_offset = new_read_offset as u64;
+                mmap.flush()?;
+                continue;
+            }
+
+            // Deserialize batch
+            let batch: BufferedBatch = bincode::deserialize(data)
+                .map_err(|e| BufferError::Serialization(e.to_string()))?;
+
+            // Update read offset
+            let new_read_offset = data_end;
+            let header_mut = unsafe { &mut *(mmap.as_mut_ptr() as *mut SegmentHeader) };
+            header_mut.read_offset = new_read_offset as u64;
+            mmap.flush()?;
+
+            let entry_size = ENTRY_HEADER_SIZE + entry_header.length as usize;
+            self.total_bytes
+                .fetch_sub(entry_size as u64, Ordering::Relaxed);
+            self.total_entries.fetch_sub(1, Ordering::Relaxed);
+
+            info!(rows = batch.rows.len(), "Read batch from disk buffer");
+
+            return Ok(Some(batch));
+        }
+
+        Ok(None)
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.total_entries.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn pending_bytes(&self) -> u64 {
+        self.total_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn pending_entries(&self) -> u64 {
+        self.total_entries.load(Ordering::Relaxed)
+    }
+
+    // /// Compact: remove fully-read segments
+    // pub fn compact(&self) -> Result<usize, BufferError> {
+    //     let mut removed = 0;
+    //     let entries = std::fs::read_dir(&self.config.dir)?;
+
+    //     for entry in entries.flatten() {
+    //         let path = entry.path();
+    //         if path.extension().map(|e| e == "seg").unwrap_or(false) {
+    //             if let Ok(file) = File::open(&path) {
+    //                 if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
+    //                     if mmap.len() >= HEADER_SIZE {
+    //                         let header =
+    //                             unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
+    //                         if header.is_valid() && header.read_offset >= header.write_offset {
+    //                             drop(mmap);
+    //                             drop(file);
+    //                             if std::fs::remove_file(&path).is_ok() {
+    //                                 removed += 1;
+    //                                 info!(path = %path.display(), "Removed empty segment");
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     Ok(removed)
+    // }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_buffer() -> (MmapRingBuffer, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = BufferConfig {
+            dir: temp_dir.path().to_path_buf(),
+            max_size: 100 * 1024 * 1024,
+            segment_size: 1024 * 1024,
+        };
+        let buffer = MmapRingBuffer::new(config).unwrap();
+        (buffer, temp_dir)
+    }
+
+    #[test]
+    fn test_write_and_read_batch() {
+        let (buffer, _temp_dir) = create_test_buffer();
+
+        let batch = BufferedBatch {
+            rows: vec![Span::new()],
+            created_at_ns: 12345,
+        };
+
+        buffer.write_batch(batch.clone()).unwrap();
+        assert!(buffer.has_pending());
+        assert_eq!(buffer.pending_entries(), 1);
+
+        let read_batch = buffer.read_batch().unwrap().unwrap();
+        assert_eq!(read_batch.rows.len(), 1);
+        assert_eq!(read_batch.created_at_ns, 12345);
+    }
+
+    #[test]
+    fn test_empty_buffer() {
+        let (buffer, _temp_dir) = create_test_buffer();
+        assert!(!buffer.has_pending());
+        assert!(buffer.read_batch().unwrap().is_none());
+    }
+}
