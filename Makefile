@@ -1,4 +1,4 @@
-.PHONY: build build-release build-linux test test-unit test-integration clean
+.PHONY: build build-release build-linux test test-unit test-integration test-e2e clean
 
 build:
 	cargo build
@@ -17,6 +17,9 @@ test-unit:
 
 test-integration:
 	cargo test --test integration_test
+
+test-e2e:
+	cargo build && cargo test --test e2e_test
 
 clean:
 	cargo clean

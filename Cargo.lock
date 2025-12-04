@@ -1257,12 +1257,15 @@ dependencies = [
  "hyper-util",
  "jemalloc_pprof",
  "lazy_static",
+ "libc",
  "memmap2",
  "moka",
  "opentelemetry-proto",
+ "portpicker",
  "pprof",
  "prometheus",
  "prost 0.14.1",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
@@ -2268,6 +2271,15 @@ name = "portable-atomic"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
+
+[[package]]
+name = "portpicker"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
+dependencies = [
+ "rand 0.8.5",
+]
 
 [[package]]
 name = "potential_utf"
