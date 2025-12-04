@@ -151,7 +151,8 @@ async fn main() {
         .route("/debug/pprof/profile", get(metrics::pprof::profile_handler))
         .route("/debug/pprof/flamegraph", get(metrics::pprof::flamegraph_handler))
         .route("/debug/pprof/heap", get(metrics::heap::heap_handler))
-        .route("/debug/pprof/stats", get(metrics::heap::stats_handler));
+        .route("/debug/pprof/stats", get(metrics::heap::stats_handler))
+        .with_state(state.clone());
 
     let health_listener = tokio::net::TcpListener::bind(&health_addr)
         .await
