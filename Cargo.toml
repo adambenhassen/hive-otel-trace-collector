@@ -1,5 +1,5 @@
 [package]
-name = "hive-otel-rust-collector"
+name = "hive-otel-trace-collector"
 version = "0.1.0"
 edition = "2024"
 

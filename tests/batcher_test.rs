@@ -1,4 +1,4 @@
-use hive_otel_rust_collector::BatcherConfig;
+use hive_otel_trace_collector::BatcherConfig;
 
 #[test]
 fn test_batcher_config_default() {

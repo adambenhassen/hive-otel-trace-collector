@@ -1,7 +1,7 @@
 mod common;
 
 use common::CREATE_TABLE_SQL;
-use hive_otel_rust_collector::{
+use hive_otel_trace_collector::{
     proto::{otlp, transform},
     ClickHouseConfig, InsertPool, Span,
 };

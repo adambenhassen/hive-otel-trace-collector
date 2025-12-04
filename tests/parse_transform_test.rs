@@ -1,4 +1,4 @@
-use hive_otel_rust_collector::proto::{otlp, transform};
+use hive_otel_trace_collector::proto::{otlp, transform};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{any_value::Value, AnyValue, KeyValue},

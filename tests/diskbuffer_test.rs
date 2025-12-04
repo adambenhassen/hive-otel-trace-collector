@@ -1,4 +1,4 @@
-use hive_otel_rust_collector::{BufferConfig, BufferedBatch, MmapRingBuffer, Span};
+use hive_otel_trace_collector::{BufferConfig, BufferedBatch, MmapRingBuffer, Span};
 use tempfile::TempDir;
 
 fn create_test_buffer() -> (MmapRingBuffer, TempDir) {

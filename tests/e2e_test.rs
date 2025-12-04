@@ -89,7 +89,7 @@ impl TestContext {
 
         // Start collector
         let collector =
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_hive-otel-rust-collector"))
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_hive-otel-trace-collector"))
                 .env("PORT", collector_port.to_string())
                 .env("HEALTH_PORT", health_port.to_string())
                 .env("CLICKHOUSE_URL", &ch_url)
