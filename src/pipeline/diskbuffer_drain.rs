@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct DrainWorker {
     insert_pool: Arc<InsertPool>,
@@ -39,8 +39,8 @@ impl DrainWorker {
         }
     }
 
-    pub async fn run(&self) {
-        info!("Disk buffer drain started");
+    pub async fn run(&self, drain_id: usize) {
+        info!(drain_id, "Disk buffer drain started");
 
         loop {
             if self.is_shutdown() && !self.disk_buffer.has_pending() {
@@ -58,16 +58,16 @@ impl DrainWorker {
                 continue;
             }
 
-            info!(
+            debug!(
                 pending_entries,
-                pending_bytes, "drain: found pending data"
+                pending_bytes, "Drain: found pending data"
             );
 
             match self.disk_buffer.read_batch() {
                 Ok(Some(batch)) => {
                     let count = batch.rows.len();
                     if let Err(e) = self.insert_pool.insert(&batch.rows).await {
-                        warn!(error = %e, spans = count, "drain: insert failed, re-buffering");
+                        warn!(error = %e, spans = count, "Drain: insert failed, re-buffering");
                         // Re-buffer the batch to avoid data loss
                         if let Err(buf_err) = self.disk_buffer.write_batch(batch) {
                             error!(error = %buf_err, spans = count, "Failed to re-buffer batch, data lost!");
@@ -77,11 +77,12 @@ impl DrainWorker {
                 Ok(None) => {
                     warn!(
                         pending_entries,
-                        "drain: pending_entries > 0 but read_batch returned None"
+                        "Drain: pending_entries > 0 but read_batch returned None, recomputing counters"
                     );
+                    self.disk_buffer.recompute_counters();
                 }
                 Err(e) => {
-                    error!(error = %e, "drain: error reading from disk buffer");
+                    error!(error = %e, "Drain: error reading from disk buffer");
                 }
             }
 

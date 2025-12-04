@@ -138,12 +138,6 @@ impl InsertPool {
             }
         }
 
-        info!(
-            url = %config.url,
-            table = %config.table,
-            "Created clickhouse client"
-        );
-
         Ok(Self {
             client,
             table: config.table,
@@ -168,7 +162,7 @@ impl InsertPool {
         let ch_ms = start.elapsed().as_millis();
         let mem_mb = metrics::get_mem_mb();
         let cpu_m = metrics::get_cpu_m();
-        info!(cpu_m, mem_mb, spans, ch_ms, "traces inserted");
+        info!(cpu_m, mem_mb, spans, ch_ms, "Traces inserted");
         self.healthy.store(true, Ordering::Relaxed);
 
         Ok(())

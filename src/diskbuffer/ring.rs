@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const MAGIC: u32 = 0x48495645; // "HIVE"
 const VERSION: u32 = 1;
@@ -120,6 +120,7 @@ struct EntryHeader {
 pub struct MmapRingBuffer {
     config: BufferConfig,
     current_segment: Mutex<Option<ActiveSegment>>,
+    read_lock: Mutex<()>,
     total_bytes: AtomicU64,
     total_entries: AtomicU64,
 }
@@ -128,6 +129,7 @@ struct ActiveSegment {
     #[allow(dead_code)] // Kept to hold fd open while mmap is active
     file: File,
     mmap: MmapMut,
+    path: PathBuf,
     write_offset: usize,
     entry_count: usize,
 }
@@ -139,6 +141,7 @@ impl MmapRingBuffer {
         let buffer = Self {
             config,
             current_segment: Mutex::new(None),
+            read_lock: Mutex::new(()),
             total_bytes: AtomicU64::new(0),
             total_entries: AtomicU64::new(0),
         };
@@ -149,6 +152,33 @@ impl MmapRingBuffer {
 
     /// Recover state from existing segment files
     fn recover(&self) -> Result<(), BufferError> {
+        let (total_bytes, total_entries, segments_ok, segments_skipped) =
+            self.scan_segments()?;
+
+        if segments_skipped > 0 {
+            warn!(
+                skipped = segments_skipped,
+                ok = segments_ok,
+                "Recovery completed with errors"
+            );
+        }
+
+        self.total_bytes.store(total_bytes, Ordering::SeqCst);
+        self.total_entries.store(total_entries, Ordering::SeqCst);
+
+        if total_bytes > 0 {
+            debug!(
+                bytes = total_bytes,
+                entries = total_entries,
+                "Recovered disk buffer state"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Scan segments and count only valid unread entries
+    fn scan_segments(&self) -> Result<(u64, u64, u64, u64), BufferError> {
         let entries = std::fs::read_dir(&self.config.dir)?;
         let mut total_bytes = 0u64;
         let mut total_entries = 0u64;
@@ -167,10 +197,6 @@ impl MmapRingBuffer {
 
             let path = entry.path();
             if path.extension().map(|e| e == "seg").unwrap_or(false) {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    total_bytes += metadata.len();
-                }
-                // Count entries by reading header
                 match File::open(&path) {
                     Ok(file) => {
                         match unsafe { MmapOptions::new().map(&file) } {
@@ -179,7 +205,11 @@ impl MmapRingBuffer {
                                     let header =
                                         unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
                                     if header.is_valid() {
-                                        total_entries += header.entry_count;
+                                        // Count actual unread entries by walking the segment
+                                        let (entries, bytes) =
+                                            Self::count_unread_entries(&mmap, &header);
+                                        total_entries += entries;
+                                        total_bytes += bytes;
                                         segments_ok += 1;
                                     } else {
                                         warn!(path = %path.display(), "Invalid segment header during recovery");
@@ -204,26 +234,60 @@ impl MmapRingBuffer {
             }
         }
 
-        if segments_skipped > 0 {
-            warn!(
-                skipped = segments_skipped,
-                ok = segments_ok,
-                "Recovery completed with errors"
-            );
+        Ok((total_bytes, total_entries, segments_ok, segments_skipped))
+    }
+
+    /// Count unread valid entries in a segment by walking from read_offset to write_offset
+    fn count_unread_entries(mmap: &memmap2::Mmap, header: &SegmentHeader) -> (u64, u64) {
+        let mut offset = header.read_offset as usize;
+        let write_offset = header.write_offset as usize;
+        let mut entries = 0u64;
+        let mut bytes = 0u64;
+
+        while offset + ENTRY_HEADER_SIZE <= write_offset && offset + ENTRY_HEADER_SIZE <= mmap.len()
+        {
+            let entry_header =
+                unsafe { std::ptr::read(mmap[offset..].as_ptr() as *const EntryHeader) };
+
+            let data_end = offset + ENTRY_HEADER_SIZE + entry_header.length as usize;
+            if data_end > write_offset || data_end > mmap.len() {
+                break; // Truncated entry
+            }
+
+            // Verify CRC - only count valid entries
+            let data = &mmap[offset + ENTRY_HEADER_SIZE..data_end];
+            let crc = crc32fast::hash(data);
+            if crc == entry_header.crc {
+                entries += 1;
+                bytes += (ENTRY_HEADER_SIZE + entry_header.length as usize) as u64;
+            }
+
+            offset = data_end;
         }
 
-        self.total_bytes.store(total_bytes, Ordering::SeqCst);
-        self.total_entries.store(total_entries, Ordering::SeqCst);
+        (entries, bytes)
+    }
 
-        if total_bytes > 0 {
-            info!(
-                bytes = total_bytes,
-                entries = total_entries,
-                "Recovered disk buffer state"
-            );
+    /// Recompute counters by scanning all segments (call when mismatch detected)
+    pub fn recompute_counters(&self) {
+        match self.scan_segments() {
+            Ok((bytes, entries, _, _)) => {
+                let old_entries = self.total_entries.swap(entries, Ordering::SeqCst);
+                let old_bytes = self.total_bytes.swap(bytes, Ordering::SeqCst);
+                if old_entries != entries || old_bytes != bytes {
+                    warn!(
+                        old_entries,
+                        new_entries = entries,
+                        old_bytes,
+                        new_bytes = bytes,
+                        "Recomputed disk buffer counters"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to recompute disk buffer counters");
+            }
         }
-
-        Ok(())
     }
 
     fn get_or_create_segment(&self) -> Result<(), BufferError> {
@@ -254,11 +318,12 @@ impl MmapRingBuffer {
             }
             mmap.flush()?;
 
-            info!(path = %path.display(), "Created new buffer segment");
+            debug!(path = %path.display(), "Created new buffer segment");
 
             *guard = Some(ActiveSegment {
                 file,
                 mmap,
+                path,
                 write_offset: HEADER_SIZE,
                 entry_count: 0,
             });
@@ -341,7 +406,7 @@ impl MmapRingBuffer {
             .fetch_add(entry_size as u64, Ordering::Relaxed);
         self.total_entries.fetch_add(1, Ordering::Relaxed);
 
-        info!(
+        debug!(
             bytes = entry_size,
             rows = batch.rows.len(),
             "Wrote batch to disk buffer"
@@ -352,6 +417,17 @@ impl MmapRingBuffer {
 
     /// Read the next batch from the buffer (for draining)
     pub fn read_batch(&self) -> Result<Option<BufferedBatch>, BufferError> {
+        // Serialize reads to prevent duplicate processing by multiple drain workers
+        let _read_guard = self.read_lock.lock().unwrap();
+
+        // Get current segment path to skip it (avoid race with writer)
+        let current_segment_path = self
+            .current_segment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.path.clone());
+
         // Find segments with unread data
         let segments: Vec<PathBuf> = std::fs::read_dir(&self.config.dir)?
             .flatten()
@@ -365,9 +441,11 @@ impl MmapRingBuffer {
             })
             .collect();
 
-        // segments.sort(); // Process oldest first
-
         for path in segments {
+            // Skip the active segment being written to
+            if current_segment_path.as_ref() == Some(&path) {
+                continue;
+            }
             let file = OpenOptions::new().read(true).write(true).open(&path)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
@@ -388,7 +466,7 @@ impl MmapRingBuffer {
 
             if read_offset >= write_offset {
                 // Segment fully read, remove it
-                info!(path = %path.display(), "Segment fully read, removing");
+                debug!(path = %path.display(), "Segment fully read, removing");
                 drop(mmap);
                 drop(file);
                 std::fs::remove_file(&path)?;
@@ -413,7 +491,11 @@ impl MmapRingBuffer {
             let data_end = data_offset + entry_header.length as usize;
 
             if data_end > mmap.len() {
-                warn!(path = %path.display(), "Truncated entry, skipping");
+                warn!(path = %path.display(), "Truncated entry, marking segment as read");
+                // Mark entire segment as read to skip it
+                let header_mut = unsafe { &mut *(mmap.as_mut_ptr() as *mut SegmentHeader) };
+                header_mut.read_offset = header_mut.write_offset;
+                mmap.flush()?;
                 continue;
             }
 
@@ -422,10 +504,12 @@ impl MmapRingBuffer {
             // verify CRC
             let crc = crc32fast::hash(data);
             if crc != entry_header.crc {
+                let entry_size = ENTRY_HEADER_SIZE + entry_header.length as usize;
                 warn!(
                     path = %path.display(),
                     expected = entry_header.crc,
                     actual = crc,
+                    entry_size,
                     "CRC mismatch, skipping entry"
                 );
                 // Update read offset to skip corrupted entry
@@ -433,6 +517,7 @@ impl MmapRingBuffer {
                 let header_mut = unsafe { &mut *(mmap.as_mut_ptr() as *mut SegmentHeader) };
                 header_mut.read_offset = new_read_offset as u64;
                 mmap.flush()?;
+                // Note: Don't decrement counters - recovery excludes invalid CRC entries
                 continue;
             }
 
@@ -451,7 +536,7 @@ impl MmapRingBuffer {
                 .fetch_sub(entry_size as u64, Ordering::Relaxed);
             self.total_entries.fetch_sub(1, Ordering::Relaxed);
 
-            info!(rows = batch.rows.len(), "Read batch from disk buffer");
+            debug!(rows = batch.rows.len(), "Read batch from disk buffer");
 
             return Ok(Some(batch));
         }

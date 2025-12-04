@@ -124,13 +124,13 @@ impl Authenticator {
 
         // Check success cache first
         if let Some(target_id) = self.success_cache.get(&cache_key).await {
-            info!("Auth cache hit (success) for target_ref={}", target_ref);
+            debug!("Auth cache hit (success) for target_ref={}", target_ref);
             return Ok(target_id);
         }
 
         // Check failure cache
         if self.failure_cache.contains_key(&cache_key) {
-            info!("Auth cache hit (failure) for target_ref={}", target_ref);
+            debug!("Auth cache hit (failure) for target_ref={}", target_ref);
             return Err("Authentication failed (cached)".to_string());
         }
 
@@ -140,11 +140,11 @@ impl Authenticator {
 
             // Re-check caches while holding lock to prevent race
             if let Some(target_id) = self.success_cache.get(&cache_key).await {
-                info!("Auth cache hit (success, after lock) for target_ref={}", target_ref);
+                debug!("Auth cache hit (success, after lock) for target_ref={}", target_ref);
                 return Ok(target_id);
             }
             if self.failure_cache.contains_key(&cache_key) {
-                info!("Auth cache hit (failure, after lock) for target_ref={}", target_ref);
+                debug!("Auth cache hit (failure, after lock) for target_ref={}", target_ref);
                 return Err("Authentication failed (cached)".to_string());
             }
 
@@ -158,7 +158,7 @@ impl Authenticator {
         };
 
         if let Some(mut rx) = receiver {
-            info!("Waiting on in-flight auth request for target_ref={}", target_ref);
+            debug!("Waiting on in-flight auth request for target_ref={}", target_ref);
             return match rx.recv().await {
                 Ok(result) => result,
                 Err(e) => Err(format!("Authentication request failed: {}", e)),
@@ -172,7 +172,7 @@ impl Authenticator {
             let mut in_flight = self.in_flight.lock().await;
             if let Some(sender) = in_flight.remove(&cache_key) {
                 if let Err(e) = sender.send(result.clone()) {
-                    info!("No waiters for auth result (all receivers dropped): {:?}", e);
+                    debug!("No waiters for auth result (all receivers dropped): {:?}", e);
                 }
             }
         }

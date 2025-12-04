@@ -45,7 +45,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("debug".parse().unwrap()))
         .with_target(false)
         .init();
 
@@ -66,6 +66,9 @@ async fn main() {
         .expect("Failed to create HTTP client");
 
     let authenticator = Authenticator::new(http_client, auth_endpoint);
+    if auth::is_auth_disabled() {
+        warn!("Authentication is DISABLED (DISABLE_AUTH=true)");
+    }
 
     let ch_config = ClickHouseConfig::from_env();
     let buffer_config = BufferConfig::from_env();
@@ -80,7 +83,7 @@ async fn main() {
     info!("Buffer directory: {:?}", buffer_config.dir);
     info!("Disk buffer enabled: {}", disk_buffer_enabled);
     info!(
-        "Memory buffer limit: {} MB (from {})",
+        "Memory buffer limit: {} MB ({})",
         batcher_config.mem_buffer_size_bytes / (1024 * 1024),
         batcher_config.mem_buffer_size_source
     );
@@ -128,11 +131,11 @@ async fn main() {
         }));
     }
 
-    // Spawn diskbuffer drain
-    {
+    // Spawn diskbuffer drain workers (same count as batch workers)
+    for drain_id in 0..worker_count {
         let drain_worker = batcher.create_drain_worker();
         handles.push(tokio::spawn(async move {
-            drain_worker.run().await;
+            drain_worker.run(drain_id).await;
         }));
     }
 
@@ -231,12 +234,12 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
         Some(ct) => match ct.to_str() {
             Ok(s) => s.contains("application/json"),
             Err(_) => {
-                warn!("Content-Type header is not valid UTF-8, treating as protobuf");
+                debug!("Content-Type header is not valid UTF-8, treating as protobuf");
                 false
             }
         },
         None => {
-            info!("No Content-Type header, defaulting to protobuf");
+            debug!("No Content-Type header, defaulting to protobuf");
             false
         }
     };
