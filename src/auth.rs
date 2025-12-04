@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 const SUCCESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);

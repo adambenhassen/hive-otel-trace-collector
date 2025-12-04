@@ -45,7 +45,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("debug".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .with_target(false)
         .init();
 

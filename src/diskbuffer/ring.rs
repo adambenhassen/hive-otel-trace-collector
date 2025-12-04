@@ -1,12 +1,89 @@
 use crate::proto::span::Span;
 use memmap2::{MmapMut, MmapOptions};
+use std::cell::UnsafeCell;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
+
+/// Wrapper around MmapMut that allows concurrent writes to non-overlapping regions.
+/// SAFETY: Callers must ensure writes to different regions don't overlap.
+struct SharedMmap {
+    ptr: *mut u8,
+    len: usize,
+    mmap: UnsafeCell<MmapMut>,
+    max_write_offset: AtomicU64,
+}
+
+// SAFETY: Concurrent writes to non-overlapping regions are safe.
+// The atomic offset reservation ensures non-overlapping writes.
+// UnsafeCell is used for interior mutability of flush operations.
+unsafe impl Send for SharedMmap {}
+unsafe impl Sync for SharedMmap {}
+
+impl SharedMmap {
+    fn new(mmap: MmapMut, initial_offset: usize) -> Self {
+        let len = mmap.len();
+        let cell = UnsafeCell::new(mmap);
+        // SAFETY: Extract pointer after UnsafeCell is constructed to ensure the pointer remains valid. 
+        // MmapMut's backing memory is heap-allocated so moving the struct doesn't invalidate the pointer.
+        let ptr = unsafe { (*cell.get()).as_ptr() as *mut u8 };
+        Self {
+            ptr,
+            len,
+            mmap: cell,
+            max_write_offset: AtomicU64::new(initial_offset as u64),
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    unsafe fn write_at(&self, offset: usize, data: &[u8]) {
+        debug_assert!(offset + data.len() <= self.len);
+        // SAFETY: Caller ensures offset + len is within bounds and non-overlapping
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(offset), data.len());
+        }
+    }
+
+    #[inline]
+    unsafe fn write_header_at<T: Copy>(&self, offset: usize, header: T) {
+        debug_assert!(offset + std::mem::size_of::<T>() <= self.len);
+        // SAFETY: Caller ensures offset is within bounds
+        // Use write_unaligned for safety - mmap offsets may not be aligned
+        unsafe {
+            std::ptr::write_unaligned(self.ptr.add(offset) as *mut T, header);
+        }
+    }
+
+    /// Update max_write_offset atomically (only increases, never decreases)
+    fn update_max_offset(&self, new_offset: usize) {
+        self.max_write_offset.fetch_max(new_offset as u64, Ordering::Release);
+    }
+
+    /// Sync the max offset to the segment header and flush
+    fn sync_header_and_flush(&self) -> io::Result<()> {
+        let max_offset = self.max_write_offset.load(Ordering::Acquire);
+        // SAFETY: write_offset is at offset 8 in SegmentHeader (after magic:u32 and version:u32),
+        // which is properly aligned for u64 on all platforms. We use AtomicU64::from_ptr
+        // to ensure atomic stores even with concurrent writers.
+        unsafe {
+            let write_offset_ptr = self.ptr.add(8) as *mut u64;
+            let atomic_ref = AtomicU64::from_ptr(write_offset_ptr);
+            atomic_ref.store(max_offset, Ordering::Release);
+        }
+        // SAFETY: UnsafeCell provides interior mutability.
+        // flush_async calls msync which is thread-safe.
+        unsafe { (*self.mmap.get()).flush_async() }
+    }
+}
 
 const MAGIC: u32 = 0x48495645; // "HIVE"
 const VERSION: u32 = 1;
@@ -82,12 +159,12 @@ pub struct BufferedBatch {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct SegmentHeader {
+struct SegmentHeader { /// On-disk segment header. Must be exactly 64 bytes.
     magic: u32,
     version: u32,
     write_offset: u64,
     read_offset: u64,
-    entry_count: u64,
+    entry_count: u64, // Unreliable during concurrent writes! use count_unread_entries() for recovery
     _reserved: [u8; 32],
 }
 
@@ -128,10 +205,10 @@ pub struct MmapRingBuffer {
 struct ActiveSegment {
     #[allow(dead_code)] // Kept to hold fd open while mmap is active
     file: File,
-    mmap: MmapMut,
+    mmap: Arc<SharedMmap>,
     path: PathBuf,
-    write_offset: usize,
-    entry_count: usize,
+    write_offset: AtomicUsize,
+    entry_count: AtomicUsize,
 }
 
 impl MmapRingBuffer {
@@ -268,7 +345,8 @@ impl MmapRingBuffer {
         (entries, bytes)
     }
 
-    /// Recompute counters by scanning all segments (call when mismatch detected)
+    /// Recompute counters by scanning all segments (useful for debugging counter drift)
+    #[allow(dead_code)]
     pub fn recompute_counters(&self) {
         match self.scan_segments() {
             Ok((bytes, entries, _, _)) => {
@@ -318,14 +396,16 @@ impl MmapRingBuffer {
             }
             mmap.flush()?;
 
+            let shared_mmap = Arc::new(SharedMmap::new(mmap, HEADER_SIZE));
+
             debug!(path = %path.display(), "Created new buffer segment");
 
             *guard = Some(ActiveSegment {
                 file,
-                mmap,
+                mmap: shared_mmap,
                 path,
-                write_offset: HEADER_SIZE,
-                entry_count: 0,
+                write_offset: AtomicUsize::new(HEADER_SIZE),
+                entry_count: AtomicUsize::new(0),
             });
         }
 
@@ -335,7 +415,7 @@ impl MmapRingBuffer {
     fn needs_rotation(&self, segment: &Option<ActiveSegment>) -> bool {
         segment
             .as_ref()
-            .map(|s| s.write_offset + 1024 * 1024 > self.config.segment_size) // 1MB margin
+            .map(|s| s.write_offset.load(Ordering::Acquire) + 1024 * 1024 > self.config.segment_size) // 1MB margin
             .unwrap_or(true)
     }
 
@@ -344,34 +424,12 @@ impl MmapRingBuffer {
             return Err(BufferError::BufferFull);
         }
 
+        // Serialize outside the lock
         let data =
             bincode::serialize(&batch).map_err(|e| BufferError::Serialization(e.to_string()))?;
-
         let entry_size = ENTRY_HEADER_SIZE + data.len();
 
-        self.get_or_create_segment()?;
-
-        let mut guard = self.current_segment.lock().unwrap();
-        let segment = guard.as_mut().ok_or(BufferError::Io(io::Error::new(
-            io::ErrorKind::Other,
-            "No active segment",
-        )))?;
-
-        // Check if entry fits in current segment
-        if segment.write_offset + entry_size > self.config.segment_size {
-            drop(guard);
-            // Force rotation by clearing current segment
-            self.current_segment.lock().unwrap().take();
-            self.get_or_create_segment()?;
-            guard = self.current_segment.lock().unwrap();
-        }
-
-        let segment = guard.as_mut().ok_or(BufferError::Io(io::Error::new(
-            io::ErrorKind::Other,
-            "No active segment after rotation",
-        )))?;
-
-        // Write entry header
+        // Prepare entry header
         let crc = crc32fast::hash(&data);
         let entry_header = EntryHeader {
             length: data.len() as u32,
@@ -380,25 +438,81 @@ impl MmapRingBuffer {
             _reserved: 0,
         };
 
-        let header_ptr = segment.mmap[segment.write_offset..].as_mut_ptr() as *mut EntryHeader;
-        unsafe {
-            std::ptr::write(header_ptr, entry_header);
+        // Reserve space atomically using compare-exchange loop
+        let (mmap, write_offset) = loop {
+            self.get_or_create_segment()?;
+
+            let guard = self.current_segment.lock().unwrap();
+            let segment = guard.as_ref().ok_or(BufferError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "No active segment",
+            )))?;
+
+            // Try to reserve space using compare-exchange loop
+            let current_offset = segment.write_offset.load(Ordering::Acquire);
+            let new_offset = current_offset + entry_size;
+
+            // Check if we need rotation - handle atomically while holding lock
+            if new_offset > self.config.segment_size {
+                // Need rotation - clear segment while holding lock to prevent
+                // multiple threads from creating duplicate segments
+                drop(guard);
+                let mut rotate_guard = self.current_segment.lock().unwrap();
+                // Re-check if rotation is still needed (another thread may have done it)
+                if rotate_guard.as_ref().map_or(true, |s| {
+                    s.write_offset.load(Ordering::Acquire) + entry_size > self.config.segment_size
+                }) {
+                    rotate_guard.take();
+                }
+                continue;
+            }
+
+            // Try to atomically reserve space
+            match segment.write_offset.compare_exchange(
+                current_offset,
+                new_offset,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Successfully reserved space
+                    segment.entry_count.fetch_add(1, Ordering::Relaxed);
+                    break (Arc::clone(&segment.mmap), current_offset);
+                }
+                Err(_) => {
+                    // Another thread modified the offset, retry
+                    continue;
+                }
+            }
+        };
+
+        // Runtime bounds check before unsafe write
+        let end_offset = write_offset + entry_size;
+        if end_offset > mmap.len() {
+            error!(
+                write_offset,
+                entry_size,
+                mmap_len = mmap.len(),
+                "Write would exceed mmap bounds - this should never happen"
+            );
+            return Err(BufferError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Write would exceed mmap bounds",
+            )));
         }
 
-        // Write data
-        let data_offset = segment.write_offset + ENTRY_HEADER_SIZE;
-        segment.mmap[data_offset..data_offset + data.len()].copy_from_slice(&data);
+        // Write data concurrently (no lock held)
+        // SAFETY: We've reserved non-overlapping space via compare-exchange and verified bounds above
+        unsafe {
+            mmap.write_header_at(write_offset, entry_header);
+            mmap.write_at(write_offset + ENTRY_HEADER_SIZE, &data);
+        }
 
-        segment.write_offset += entry_size;
-        segment.entry_count += 1;
+        // Update max offset atomically (uses fetch_max, never decreases)
+        mmap.update_max_offset(end_offset);
 
-        // Update header
-        let header = unsafe { &mut *(segment.mmap.as_mut_ptr() as *mut SegmentHeader) };
-        header.write_offset = segment.write_offset as u64;
-        header.entry_count = segment.entry_count as u64;
-
-        // Async flush (don't block)
-        if let Err(e) = segment.mmap.flush_async() {
+        // Sync header and async flush
+        if let Err(e) = mmap.sync_header_and_flush() {
             warn!(error = %e, "Async mmap flush failed, data may not be durable");
         }
 
@@ -536,7 +650,7 @@ impl MmapRingBuffer {
                 .fetch_sub(entry_size as u64, Ordering::Relaxed);
             self.total_entries.fetch_sub(1, Ordering::Relaxed);
 
-            debug!(rows = batch.rows.len(), "Read batch from disk buffer");
+            debug!(rows = batch.rows.len(), "Drain: Read batch from disk buffer");
 
             return Ok(Some(batch));
         }
@@ -554,6 +668,21 @@ impl MmapRingBuffer {
 
     pub fn pending_entries(&self) -> u64 {
         self.total_entries.load(Ordering::Relaxed)
+    }
+
+    /// Force rotation of the active segment so it can be drained.
+    pub fn force_rotation(&self) {
+        let mut guard = self.current_segment.lock().unwrap();
+        if let Some(segment) = guard.as_ref() {
+            // Only rotate if segment has data
+            if segment.write_offset.load(Ordering::Acquire) > HEADER_SIZE {
+                debug!(
+                    path = %segment.path.display(),
+                    "Forcing segment rotation for drain"
+                );
+                guard.take();
+            }
+        }
     }
 
     // /// Compact: remove fully-read segments

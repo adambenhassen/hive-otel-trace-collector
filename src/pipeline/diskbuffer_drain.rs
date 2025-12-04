@@ -75,11 +75,13 @@ impl DrainWorker {
                     }
                 }
                 Ok(None) => {
-                    warn!(
+                    // Data is likely in the active segment which is skipped.
+                    // Force rotation so we can drain it.
+                    debug!(
                         pending_entries,
-                        "Drain: pending_entries > 0 but read_batch returned None, recomputing counters"
+                        "Drain: pending_entries > 0 but read_batch returned None, forcing rotation"
                     );
-                    self.disk_buffer.recompute_counters();
+                    self.disk_buffer.force_rotation();
                 }
                 Err(e) => {
                     error!(error = %e, "Drain: error reading from disk buffer");
