@@ -11,6 +11,7 @@ A high-performance OpenTelemetry trace collector written in Rust. Ingests OTLP t
 - 📊 **Auto memory detection** - Detects cgroup limits (containers) or system memory
 - 💾 **Disk buffer** - Memory-mapped ring buffer for durable overflow handling
 - 🔐 **Authentication** - Validates requests against an external auth endpoint with caching
+- 📏 **Span size filtering** - Configurable max span size (SPAN_MAX_SIZE_KB env var)
 - 🔥 **Profiling endpoints** - CPU profiling, flamegraphs, and heap stats via pprof
 - 🛑 **Graceful shutdown** - Drains in-flight batches before terminating
 
