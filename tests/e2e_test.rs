@@ -78,7 +78,6 @@ impl TestContext {
         // Find available ports
         let collector_port = portpicker::pick_unused_port().expect("No free port");
         let health_port = portpicker::pick_unused_port().expect("No free port");
-        let healthcheck_port = portpicker::pick_unused_port().expect("No free port");
 
         let buffer_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let log_dir = tempfile::tempdir().expect("Failed to create log dir");
@@ -93,7 +92,6 @@ impl TestContext {
             tokio::process::Command::new(env!("CARGO_BIN_EXE_hive-otel-rust-collector"))
                 .env("PORT", collector_port.to_string())
                 .env("HEALTH_PORT", health_port.to_string())
-                .env("HEALTHCHECK_PORT", healthcheck_port.to_string())
                 .env("CLICKHOUSE_URL", &ch_url)
                 .env("CLICKHOUSE_DATABASE", "default")
                 .env("CLICKHOUSE_TABLE", "otel_traces")

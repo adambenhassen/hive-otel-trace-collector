@@ -143,9 +143,10 @@ async fn main() {
     }
 
     // Start health server on separate port
-    let health_port = env::var("HEALTH_PORT").unwrap_or_else(|_| "9090".to_string());
+    let health_port = env::var("HEALTH_PORT").unwrap_or_else(|_| "13133".to_string());
     let health_addr = format!("0.0.0.0:{}", health_port);
     let health_app = Router::new()
+        .route("/", get(|| async { "OK" }))
         .route("/ready", get(ready_handler))
         .route("/health", get(|| async { "OK" }))
         .route("/debug/pprof/profile", get(metrics::pprof::profile_handler))
@@ -164,25 +165,6 @@ async fn main() {
     tokio::spawn(async move {
         if let Err(e) = axum::serve(health_listener, health_app).await {
             error!("Health server error: {}", e);
-        }
-    });
-
-    // Start healthcheck server on port 13133
-    let healthcheck_port = env::var("HEALTHCHECK_PORT").unwrap_or_else(|_| "13133".to_string());
-    let healthcheck_addr = format!("0.0.0.0:{}", healthcheck_port);
-    let healthcheck_app = Router::new()
-        .route("/", get(|| async { "OK" }));
-
-    let healthcheck_listener = tokio::net::TcpListener::bind(&healthcheck_addr)
-        .await
-        .unwrap_or_else(|e| {
-            panic!("Failed to bind healthcheck server to {}: {}. Is the port already in use?", healthcheck_addr, e)
-        });
-    info!("Healthcheck server listening on {}", healthcheck_addr);
-
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(healthcheck_listener, healthcheck_app).await {
-            error!("Healthcheck server error: {}", e);
         }
     });
 

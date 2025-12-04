@@ -26,8 +26,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `4318` | Main OTLP receiver port |
-| `HEALTH_PORT` | `9090` | Health/profiling server port |
-| `HEALTHCHECK_PORT` | `13133` | Kubernetes healthcheck port |
+| `HEALTH_PORT` | `13133` | Health/profiling server port |
 | `HIVE_OTEL_AUTH_ENDPOINT` | `http://graphql-api:4000/otel-auth` | Auth validation endpoint |
 | `CLICKHOUSE_URL` | - | ClickHouse connection URL |
 | `CLICKHOUSE_DATABASE` | - | Target database |
@@ -39,12 +38,13 @@ Environment variables:
 | Path | Port | Description |
 |------|------|-------------|
 | `/v1/traces` | 4318 | OTLP trace ingestion |
-| `/health` | 9090 | Health check |
-| `/ready` | 9090 | Readiness check (basic backpressure awareness) |
-| `/debug/pprof/profile` | 9090 | CPU profile |
-| `/debug/pprof/flamegraph` | 9090 | Flamegraph SVG |
-| `/debug/pprof/heap` | 9090 | Heap profile |
-| `/debug/pprof/stats` | 9090 | jemalloc stats |
+| `/` | 13133 | Liveness probe |
+| `/health` | 13133 | Health check |
+| `/ready` | 13133 | Readiness check (basic backpressure awareness) |
+| `/debug/pprof/profile` | 13133 | CPU profile |
+| `/debug/pprof/flamegraph` | 13133 | Flamegraph SVG |
+| `/debug/pprof/heap` | 13133 | Heap profile |
+| `/debug/pprof/stats` | 13133 | jemalloc stats |
 
 ## Architecture
 
