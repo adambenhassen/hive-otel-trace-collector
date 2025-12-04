@@ -50,13 +50,43 @@ Environment variables:
 
 ```
 Request → Auth → Parser → Batcher → Workers → ClickHouse
-                             ↓         ↑
-                        Disk Buffer ───┘
+                        ↓                         ↑
+                    Disk Buffer ───→ Drain ───────┘
 ```
 
-- **Batcher**: Accumulates spans and flushes to ClickHouse in configurable batch sizes
-- **Disk Buffer**: Memory-mapped ring buffer catches overflow when the channel is full. Large requests (>1MB, configurable) are written directly to disk to avoid memory pressure.
-- **Drain Worker**: Background task that replays buffered batches to ClickHouse
+```
+HTTP POST /v1/traces (4318)
+        │
+        ├─→ Auth
+        │   - External validation via HIVE_OTEL_AUTH_ENDPOINT
+        │   - Dual-cache: success (30s TTL), failure (5s TTL)
+        │   - In-flight request deduplication via broadcast channels
+        │
+        ├─→ Parse
+        │   - Auto-detects JSON vs Protobuf (Content-Type)
+        │   - SIMD-accelerated JSON parsing (simd-json)
+        │
+        ├─→ Transform
+        │   - OTLP spans → ClickHouse row format
+        │   - Injects target_id into resource/span attributes
+        │
+        ├─→ Decision: Large request? (>1MB)
+        │   - Yes → Direct to disk buffer
+        │   - No → Channel to batcher
+        │
+        ├─→ Batcher
+        │   - Accumulates spans (10K batch size default)
+        │   - Flushes on timeout (200ms) or when full
+        │   - Channel full → overflow to disk buffer
+        │
+        ├─→ Disk Buffer
+        │   - Memory-mapped circular buffer (1GB default)
+        │   - Async flushes to ClickHouse
+        │
+        └─→ ClickHouse
+            - Async batched insert with LZ4 compression
+            - Failure → disk buffer fallback
+```
 
 ## License
 
