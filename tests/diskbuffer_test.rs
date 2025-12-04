@@ -25,6 +25,10 @@ fn test_write_and_read_batch() {
     assert!(buffer.has_pending());
     assert_eq!(buffer.pending_entries(), 1);
 
+    // Force rotation so the active segment can be read
+    // (read_batch skips active segment to avoid race with concurrent writers)
+    buffer.force_rotation();
+
     let read_batch = buffer.read_batch().unwrap().unwrap();
     assert_eq!(read_batch.rows.len(), 1);
     assert_eq!(read_batch.created_at_ns, 12345);
