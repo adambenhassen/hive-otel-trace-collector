@@ -267,7 +267,7 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
     };
 
     // Parse OTLP request
-    let request = match proto::parse::parse(&body_bytes, is_json) {
+    let request = match proto::otlp::parse(&body_bytes, is_json) {
         Ok(req) => req,
         Err(e) => {
             warn!("Failed to parse OTLP: {}", e);

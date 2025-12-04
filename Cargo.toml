@@ -46,3 +46,5 @@ tempfile = "3.23.0"
 tokio-test = "0.4"
 wiremock = "0.6"
 axum-test = "16"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["clickhouse"] }

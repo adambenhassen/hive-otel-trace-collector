@@ -41,7 +41,6 @@ impl DrainWorker {
 
     pub async fn run(&self) {
         info!("Disk buffer drain started");
-        let mut backoff_ms = 100u64;
 
         loop {
             if self.is_shutdown() && !self.disk_buffer.has_pending() {
@@ -63,7 +62,6 @@ impl DrainWorker {
                 pending_entries,
                 pending_bytes, "drain: found pending data"
             );
-            backoff_ms = 100;
 
             match self.disk_buffer.read_batch() {
                 Ok(Some(batch)) => {

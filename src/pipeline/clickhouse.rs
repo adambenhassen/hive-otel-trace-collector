@@ -3,7 +3,7 @@ use crate::proto::span::Span;
 use clickhouse::{Client, Compression};
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{info};
 
 #[derive(Error, Debug)]
 pub enum InsertError {
