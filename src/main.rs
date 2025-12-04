@@ -17,8 +17,9 @@ use axum::{
     Router,
 };
 use diskbuffer::{BufferConfig, BufferedBatch, MmapRingBuffer};
-use pipeline::{Batcher, BatcherConfig, BatcherError, BatcherHandle, ClickHouseConfig, InsertPool};
+use pipeline::{Batcher, BatcherConfig, BatcherHandle, ClickHouseConfig, InsertPool};
 use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, sync::Arc, time::Duration};
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -29,7 +30,6 @@ use url::Url;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30); // Request body read timeout
 
 // Threshold for writing directly to disk (skip channel to avoid OOM)
-const DIRECT_TO_DISK_THRESHOLD_SPANS: usize = 1000;
 const DIRECT_TO_DISK_THRESHOLD_BYTES: usize = 1024 * 1024; // 1MB
 
 struct AppState {
@@ -37,6 +37,8 @@ struct AppState {
     batcher_handle: BatcherHandle,
     disk_buffer: Arc<MmapRingBuffer>,
     disk_buffer_enabled: bool,
+    mem_buffer_limit_mb: u64,
+    in_backpressure: AtomicBool,
 }
 
 #[tokio::main]
@@ -69,13 +71,18 @@ async fn main() {
     let batcher_config = BatcherConfig::from_env();
 
     let disk_buffer_enabled = env::var("DISK_BUFFER_ENABLED")
-        .map(|s| s == "true" || s == "1")
-        .unwrap_or(false);
+        .map(|s| s != "false" && s != "0")
+        .unwrap_or(true);
 
     info!("Clickhouse URL: {}", ch_config.url);
     info!("Clickhouse table: {}.{}", ch_config.database, ch_config.table);
     info!("Buffer directory: {:?}", buffer_config.dir);
     info!("Disk buffer enabled: {}", disk_buffer_enabled);
+    info!(
+        "Memory buffer limit: {} MB (from {})",
+        batcher_config.mem_buffer_size_bytes / (1024 * 1024),
+        batcher_config.mem_buffer_size_source
+    );
 
     let insert_pool = InsertPool::new(ch_config)
         .await
@@ -87,6 +94,7 @@ async fn main() {
     let disk_buffer = Arc::new(disk_buffer);
 
     let worker_count = batcher_config.worker_count;
+    let mem_buffer_limit_mb = batcher_config.mem_buffer_limit_mb();
 
     let (batcher, handle) = Batcher::new(
         batcher_config,
@@ -99,6 +107,8 @@ async fn main() {
         batcher_handle: handle,
         disk_buffer,
         disk_buffer_enabled,
+        mem_buffer_limit_mb,
+        in_backpressure: AtomicBool::new(false),
     });
 
     // Build router
@@ -132,7 +142,7 @@ async fn main() {
             let shutdown = b.shutdown_notify();
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
                         metrics::proc::update_process_metrics();
                     }
                     _ = shutdown.notified() => {
@@ -263,15 +273,22 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
     let span_count = rows.len();
     let body_size = body_bytes.len();
 
-    // Large requests go directly to disk to avoid OOM (if disk buffer enabled)
-    if state.disk_buffer_enabled
-        && (span_count > DIRECT_TO_DISK_THRESHOLD_SPANS || body_size > DIRECT_TO_DISK_THRESHOLD_BYTES)
-    {
-        info!(
+    // Check if we should buffer to disk based on:
+    // 1. Large request size (>1MB)
+    // 2. Process memory exceeds limit
+    let process_mem_mb = metrics::proc::get_mem_mb();
+    let should_buffer_to_disk = state.disk_buffer_enabled
+        && (body_size > DIRECT_TO_DISK_THRESHOLD_BYTES
+            || process_mem_mb >= state.mem_buffer_limit_mb);
+
+    if should_buffer_to_disk {
+        debug!(
             spans = span_count,
             body_size,
+            process_mem_mb,
+            mem_limit_mb = state.mem_buffer_limit_mb,
             target_id = %target_id,
-            "Large request, buffering to disk"
+            "Buffering to disk"
         );
         let batch = BufferedBatch {
             rows,
@@ -280,13 +297,13 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
         return match state.disk_buffer.write_batch(batch) {
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => {
-                error!("Failed to buffer large request to disk: {}", e);
+                error!("Failed to buffer to disk: {}", e);
                 (StatusCode::SERVICE_UNAVAILABLE, "Buffer full").into_response()
             }
         };
     }
 
-    // Send to batcher (small requests)
+    // Send to batcher
     match state.batcher_handle.send(rows) {
         Ok(()) => {
             debug!(
@@ -296,9 +313,16 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
             );
             StatusCode::OK.into_response()
         }
-        Err(BatcherError::ChannelFullWithData(rows)) => {
+        Err(rows) => {
+            // Channel closed (shutdown) try disk buffer
+            let span_count = rows.len();
+            debug!(
+                spans = span_count,
+                target_id = %target_id,
+                "Batcher channel closed, attempting disk buffer fallback"
+            );
+
             if state.disk_buffer_enabled {
-                // Try to buffer to disk
                 let batch = BufferedBatch {
                     rows,
                     created_at_ns: current_time_nanos(),
@@ -306,28 +330,44 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
                 match state.disk_buffer.write_batch(batch) {
                     Ok(()) => StatusCode::OK.into_response(),
                     Err(e) => {
-                        error!("Failed to buffer to disk: {}", e);
+                        error!(spans = span_count, error = %e, "Failed to buffer to disk");
                         (StatusCode::SERVICE_UNAVAILABLE, "Buffer full").into_response()
                     }
                 }
             } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "Channel full").into_response()
+                error!(spans = span_count, "Channel closed and disk buffer disabled, data lost");
+                (StatusCode::SERVICE_UNAVAILABLE, "Channel closed").into_response()
             }
-        }
-        Err(BatcherError::Disconnected) => {
-            error!("Batcher channel disconnected");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
         }
     }
 }
 
 async fn ready_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let level = state.batcher_handle.channel_len();
-    if level < 95_000 {
-        (StatusCode::OK, "ready")
+    let process_mem_mb = metrics::proc::get_mem_mb();
+    let high_threshold = (state.mem_buffer_limit_mb * 95) / 100; // 95% - become unready
+    let low_threshold = (state.mem_buffer_limit_mb * 85) / 100;  // 85% - become ready again
+
+    let was_in_backpressure = state.in_backpressure.load(Ordering::Relaxed);
+
+    // Hysteresis: once in backpressure, stay until memory drops below low threshold
+    let is_in_backpressure = if was_in_backpressure {
+        // Stay in backpressure until memory drops below 85%
+        process_mem_mb >= low_threshold
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "not ready - backpressure")
+        // Enter backpressure when memory exceeds 95%
+        process_mem_mb >= high_threshold
+    };
+
+    // Update state if changed
+    if is_in_backpressure != was_in_backpressure {
+        state.in_backpressure.store(is_in_backpressure, Ordering::Relaxed);
     }
+
+    if is_in_backpressure {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not ready, memory backpressure");
+    }
+
+    (StatusCode::OK, "ready")
 }
 
 async fn shutdown_signal() {

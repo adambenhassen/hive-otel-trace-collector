@@ -1,7 +1,8 @@
 use crate::diskbuffer::{BufferedBatch, MmapRingBuffer};
+use crate::metrics::mem_limit::{default_buffer_size_with_source, BufferSizeSource};
 use crate::pipeline::clickhouse::InsertPool;
 use crate::proto::span::Span;
-use async_channel::{Receiver, Sender, TrySendError};
+use async_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,43 +13,95 @@ use tracing::{error, info, warn};
 pub struct BatcherConfig {
     pub max_batch_size: usize,
     pub max_batch_timeout: Duration,
-    pub channel_capacity: usize,
     pub worker_count: usize,
+    pub mem_buffer_size_bytes: usize,
+    pub mem_buffer_size_source: BufferSizeSource,
 }
 
 impl Default for BatcherConfig {
     fn default() -> Self {
+        let (mem_buffer_size_bytes, mem_buffer_size_source) = default_buffer_size_with_source();
         Self {
             max_batch_size: 10_000,
             max_batch_timeout: Duration::from_millis(200),
-            channel_capacity: 100_000,
             worker_count: 4,
+            mem_buffer_size_bytes,
+            mem_buffer_size_source,
         }
     }
 }
 
 impl BatcherConfig {
     pub fn from_env() -> Self {
+        // Check if MEM_BUFFER_SIZE_MB is set in environment
+        let (mem_buffer_size_bytes, mem_buffer_size_source) =
+            match std::env::var("MEM_BUFFER_SIZE_MB") {
+                Ok(s) => match s.parse::<usize>() {
+                    Ok(mb) => (mb * 1024 * 1024, BufferSizeSource::Env),
+                    Err(_) => {
+                        warn!(value = %s, "Invalid MEM_BUFFER_SIZE_MB, using auto-detected value");
+                        default_buffer_size_with_source()
+                    }
+                },
+                Err(_) => default_buffer_size_with_source(),
+            };
+
+        let max_batch_size = match std::env::var("BATCH_MAX_SPANS") {
+            Ok(s) => match s.parse::<usize>() {
+                Ok(v) if v > 0 => v,
+                Ok(_) => {
+                    warn!(value = %s, "BATCH_MAX_SPANS must be positive, using default 10000");
+                    10_000
+                }
+                Err(_) => {
+                    warn!(value = %s, "Invalid BATCH_MAX_SPANS, using default 10000");
+                    10_000
+                }
+            },
+            Err(_) => 10_000,
+        };
+
+        let batch_timeout_ms = match std::env::var("BATCH_TIMEOUT_MS") {
+            Ok(s) => match s.parse::<u64>() {
+                Ok(v) if v > 0 => v,
+                Ok(_) => {
+                    warn!(value = %s, "BATCH_TIMEOUT_MS must be positive, using default 200");
+                    200
+                }
+                Err(_) => {
+                    warn!(value = %s, "Invalid BATCH_TIMEOUT_MS, using default 200");
+                    200
+                }
+            },
+            Err(_) => 200,
+        };
+
+        let worker_count = match std::env::var("BATCH_WORKERS") {
+            Ok(s) => match s.parse::<usize>() {
+                Ok(v) if v > 0 => v,
+                Ok(_) => {
+                    warn!(value = %s, "BATCH_WORKERS must be positive, using default 4");
+                    4
+                }
+                Err(_) => {
+                    warn!(value = %s, "Invalid BATCH_WORKERS, using default 4");
+                    4
+                }
+            },
+            Err(_) => 4,
+        };
+
         Self {
-            max_batch_size: std::env::var("BATCH_MAX_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10_000),
-            max_batch_timeout: Duration::from_millis(
-                std::env::var("BATCH_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(200),
-            ),
-            channel_capacity: std::env::var("MEM_BUFFER_CAPACITY")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100_000),
-            worker_count: std::env::var("BATCH_WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4),
+            max_batch_size,
+            max_batch_timeout: Duration::from_millis(batch_timeout_ms),
+            worker_count,
+            mem_buffer_size_bytes,
+            mem_buffer_size_source,
         }
+    }
+
+    pub fn mem_buffer_limit_mb(&self) -> u64 {
+        (self.mem_buffer_size_bytes / (1024 * 1024)) as u64
     }
 }
 
@@ -58,24 +111,11 @@ pub struct BatcherHandle {
 }
 
 impl BatcherHandle {
-    pub fn send(&self, rows: Vec<Span>) -> Result<(), BatcherError> {
-        match self.sender.try_send(rows) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(rows)) => Err(BatcherError::ChannelFullWithData(rows)),
-            Err(TrySendError::Closed(_)) => Err(BatcherError::Disconnected),
-        }
+    pub fn send(&self, rows: Vec<Span>) -> Result<(), Vec<Span>> {
+        self.sender
+            .try_send(rows)
+            .map_err(|e| e.into_inner())
     }
-
-    /// Get current channel length
-    pub fn channel_len(&self) -> usize {
-        self.sender.len()
-    }
-}
-
-#[derive(Debug)]
-pub enum BatcherError {
-    ChannelFullWithData(Vec<Span>),
-    Disconnected,
 }
 
 pub struct Batcher {
@@ -93,7 +133,7 @@ impl Batcher {
         insert_pool: Arc<InsertPool>,
         disk_buffer: Arc<MmapRingBuffer>,
     ) -> (Self, BatcherHandle) {
-        let (sender, receiver) = async_channel::bounded(config.channel_capacity);
+        let (sender, receiver) = async_channel::unbounded();
 
         let handle = BatcherHandle { sender };
 
@@ -220,4 +260,3 @@ impl Batcher {
         self.shutdown.load(Ordering::Relaxed)
     }
 }
-

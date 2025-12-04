@@ -7,8 +7,10 @@ A high-performance OpenTelemetry trace collector written in Rust. Ingests OTLP t
 - **OTLP/HTTP ingestion** - Accepts traces on `/v1/traces` (port 4318)
 - **Protobuf & JSON support** - Auto-detects content type
 - **ClickHouse storage** - Batched inserts with configurable workers
-- **Disk buffer** - Memory-mapped ring buffer for backpressure handling
-- **Authentication** - Validates requests against an external auth endpoint
+- **Memory-based backpressure** - Monitors process RSS and spills to disk when limit exceeded
+- **Auto memory detection** - Detects cgroup limits (containers) or system memory
+- **Disk buffer** - Memory-mapped ring buffer for durable overflow handling
+- **Authentication** - Validates requests against an external auth endpoint with caching
 - **Profiling endpoints** - CPU profiling, flamegraphs, and heap stats via pprof
 - **Graceful shutdown** - Drains in-flight batches before terminating
 
@@ -49,15 +51,17 @@ Environment variables:
 | `CLICKHOUSE_PASSWORD` | - | ClickHouse password |
 | `CLICKHOUSE_ASYNC_INSERT` | `true` | Enable async inserts |
 | `CLICKHOUSE_WAIT_FOR_ASYNC_INSERT` | `false` | Wait for async insert confirmation |
-| `BATCH_MAX_SIZE` | `10000` | Max spans per batch |
+| `BATCH_MAX_SPANS` | `10000` | Max spans per batch |
 | `BATCH_TIMEOUT_MS` | `200` | Batch flush timeout |
 | `BATCH_WORKERS` | `4` | Number of batcher workers |
-| `MEM_BUFFER_CAPACITY` | `100000` | Max pending requests in memory before backpressure |
-| `DISK_BUFFER_ENABLED` | `false` | Enable disk buffer for backpressure |
+| `MEM_BUFFER_SIZE_MB` | auto | Memory buffer limit in MB (default: 90% cgroup or 25% system) |
+| `DISK_BUFFER_ENABLED` | `true` | Enable disk buffer for backpressure |
 | `DISK_BUFFER_DIR` | `/var/lib/otel-collector/buffer` | Disk buffer directory |
-| `DISK_BUFFER_MAX_SIZE` | `1073741824` | Max buffer size (1GB) |
-| `DISK_BUFFER_SEGMENT_SIZE` | `16777216` | Buffer segment size (16MB) |
+| `DISK_BUFFER_MAX_SIZE_MB` | `1024` | Max disk buffer size in MB (1GB) |
+| `DISK_BUFFER_SEGMENT_SIZE_MB` | `64` | Buffer segment size in MB |
 | `RUST_LOG` | `info` | Logging level (e.g., `info`, `debug`) |
+
+**Note**: `MEM_BUFFER_SIZE_MB` defaults to 90% of cgroup memory limit (when containerized) or 25% of available system memory. When process memory exceeds this limit, new requests are written to disk buffer instead of memory.
 
 ## Endpoints
 
@@ -66,7 +70,7 @@ Environment variables:
 | `/v1/traces` | 4318 | OTLP trace ingestion |
 | `/` | 13133 | Liveness probe |
 | `/health` | 13133 | Health check |
-| `/ready` | 13133 | Readiness check (basic backpressure awareness) |
+| `/ready` | 13133 | Readiness check |
 | `/debug/pprof/profile` | 13133 | CPU profile |
 | `/debug/pprof/flamegraph` | 13133 | Flamegraph SVG |
 | `/debug/pprof/heap` | 13133 | Heap profile |
@@ -99,11 +103,14 @@ HTTP POST /v1/traces (4318)
         ├─→ Decision: Large request? (>1MB)
         │   - Yes → Direct to disk buffer
         │   - No → Channel to batcher
+        |
+        ├─→ Decision: RSS over MEM_BUFFER_SIZE_MB?
+        │   - Yes → Direct to disk buffer
+        │   - No → Channel to batcher
         │
-        ├─→ Batcher
+        ├─→ Batcher (Memory buffer)
         │   - Accumulates spans (10K batch size default)
         │   - Flushes on timeout (200ms) or when full
-        │   - Channel full → overflow to disk buffer
         │
         ├─→ Disk Buffer
         │   - Memory-mapped circular buffer (1GB default)

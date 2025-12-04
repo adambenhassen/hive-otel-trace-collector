@@ -44,19 +44,33 @@ impl Default for BufferConfig {
 
 impl BufferConfig {
     pub fn from_env() -> Self {
-        Self {
-            dir: std::env::var("DISK_BUFFER_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/var/lib/otel-collector/buffer")),
-            max_size: std::env::var("DISK_BUFFER_MAX_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10 * 1024 * 1024 * 1024),
-            segment_size: std::env::var("DISK_BUFFER_SEGMENT_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(64 * 1024 * 1024),
-        }
+        let dir = std::env::var("DISK_BUFFER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/var/lib/otel-collector/buffer"));
+
+        let max_size = match std::env::var("DISK_BUFFER_MAX_SIZE_MB") {
+            Ok(s) => match s.parse::<u64>() {
+                Ok(mb) => mb * 1024 * 1024,
+                Err(_) => {
+                    warn!(value = %s, "Invalid DISK_BUFFER_MAX_SIZE_MB, using default 1024 MB");
+                    1024 * 1024 * 1024
+                }
+            },
+            Err(_) => 1024 * 1024 * 1024, // 1GB default
+        };
+
+        let segment_size = match std::env::var("DISK_BUFFER_SEGMENT_SIZE_MB") {
+            Ok(s) => match s.parse::<usize>() {
+                Ok(mb) => mb * 1024 * 1024,
+                Err(_) => {
+                    warn!(value = %s, "Invalid DISK_BUFFER_SEGMENT_SIZE_MB, using default 64 MB");
+                    64 * 1024 * 1024
+                }
+            },
+            Err(_) => 64 * 1024 * 1024,
+        };
+
+        Self { dir, max_size, segment_size }
     }
 }
 
@@ -138,26 +152,64 @@ impl MmapRingBuffer {
         let entries = std::fs::read_dir(&self.config.dir)?;
         let mut total_bytes = 0u64;
         let mut total_entries = 0u64;
+        let mut segments_ok = 0u64;
+        let mut segments_skipped = 0u64;
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "Failed to read directory entry during recovery, skipping");
+                    segments_skipped += 1;
+                    continue;
+                }
+            };
+
             let path = entry.path();
             if path.extension().map(|e| e == "seg").unwrap_or(false) {
                 if let Ok(metadata) = std::fs::metadata(&path) {
                     total_bytes += metadata.len();
                 }
                 // Count entries by reading header
-                if let Ok(file) = File::open(&path) {
-                    if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
-                        if mmap.len() >= HEADER_SIZE {
-                            let header =
-                                unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
-                            if header.is_valid() {
-                                total_entries += header.entry_count;
+                match File::open(&path) {
+                    Ok(file) => {
+                        match unsafe { MmapOptions::new().map(&file) } {
+                            Ok(mmap) => {
+                                if mmap.len() >= HEADER_SIZE {
+                                    let header =
+                                        unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
+                                    if header.is_valid() {
+                                        total_entries += header.entry_count;
+                                        segments_ok += 1;
+                                    } else {
+                                        warn!(path = %path.display(), "Invalid segment header during recovery");
+                                        segments_skipped += 1;
+                                    }
+                                } else {
+                                    warn!(path = %path.display(), "Segment file too small during recovery");
+                                    segments_skipped += 1;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(path = %path.display(), error = %e, "Failed to mmap segment during recovery, skipping");
+                                segments_skipped += 1;
                             }
                         }
                     }
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "Failed to open segment during recovery, skipping");
+                        segments_skipped += 1;
+                    }
                 }
             }
+        }
+
+        if segments_skipped > 0 {
+            warn!(
+                skipped = segments_skipped,
+                ok = segments_ok,
+                "Recovery completed with errors"
+            );
         }
 
         self.total_bytes.store(total_bytes, Ordering::SeqCst);
@@ -345,6 +397,12 @@ impl MmapRingBuffer {
 
             // Read entry header
             if read_offset + ENTRY_HEADER_SIZE > mmap.len() {
+                warn!(
+                    path = %path.display(),
+                    read_offset,
+                    mmap_len = mmap.len(),
+                    "Entry header would exceed segment bounds, skipping"
+                );
                 continue;
             }
 
