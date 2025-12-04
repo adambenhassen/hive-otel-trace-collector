@@ -1,20 +1,20 @@
-# Hive OTEL Trace Collector
+# 🐝 Hive OTEL Trace Collector
 
 A high-performance OpenTelemetry trace collector written in Rust. Ingests OTLP traces (Protobuf and JSON) and stores them in ClickHouse.
 
-## Features
+## ✨ Features
 
-- **OTLP/HTTP ingestion** - Accepts traces on `/v1/traces` (port 4318)
-- **Protobuf & JSON support** - Auto-detects content type
-- **ClickHouse storage** - Batched inserts with configurable workers
-- **Memory-based backpressure** - Monitors process RSS and spills to disk when limit exceeded
-- **Auto memory detection** - Detects cgroup limits (containers) or system memory
-- **Disk buffer** - Memory-mapped ring buffer for durable overflow handling
-- **Authentication** - Validates requests against an external auth endpoint with caching
-- **Profiling endpoints** - CPU profiling, flamegraphs, and heap stats via pprof
-- **Graceful shutdown** - Drains in-flight batches before terminating
+- 📡 **OTLP/HTTP ingestion** - Accepts traces on `/v1/traces` (port 4318)
+- 🔄 **Protobuf & JSON support** - Auto-detects content type
+- 🗄️ **ClickHouse storage** - Batched inserts with configurable workers
+- 🧠 **Memory-based backpressure** - Monitors process RSS and spills to disk when limit exceeded
+- 📊 **Auto memory detection** - Detects cgroup limits (containers) or system memory
+- 💾 **Disk buffer** - Memory-mapped ring buffer for durable overflow handling
+- 🔐 **Authentication** - Validates requests against an external auth endpoint with caching
+- 🔥 **Profiling endpoints** - CPU profiling, flamegraphs, and heap stats via pprof
+- 🛑 **Graceful shutdown** - Drains in-flight batches before terminating
 
-## Building
+## 🔨 Building
 
 ```bash
 make build          # Debug build
@@ -22,7 +22,7 @@ make build-release  # Release build
 make build-linux    # Cross-compile for Linux
 ```
 
-## Testing
+## 🧪 Testing
 
 ```bash
 make test             # Run all tests
@@ -31,7 +31,7 @@ make test-integration # Integration tests (requires Docker)
 make test-e2e         # End-to-end tests (requires Docker)
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 Environment variables:
 
@@ -63,7 +63,7 @@ Environment variables:
 
 **Note**: `MEM_BUFFER_SIZE_MB` defaults to 90% of cgroup memory limit (when containerized) or 25% of available system memory. When process memory exceeds this limit, new requests are written to disk buffer instead of memory.
 
-## Endpoints
+## 🌐 Endpoints
 
 | Path | Port | Description |
 |------|------|-------------|
@@ -76,7 +76,7 @@ Environment variables:
 | `/debug/pprof/heap` | 13133 | Heap profile |
 | `/debug/pprof/stats` | 13133 | jemalloc stats |
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 Request → Auth → Parser → Batcher → Workers → ClickHouse
@@ -121,6 +121,6 @@ HTTP POST /v1/traces (4318)
             - Failure → disk buffer fallback
 ```
 
-## License
+## 📄 License
 
 MIT License, part of the-guild.
