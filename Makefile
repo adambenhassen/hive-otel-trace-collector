@@ -12,9 +12,6 @@ build-linux:
 test:
 	cargo test
 
-test-unit:
-	cargo test --lib
-
 test-integration:
 	cargo test --test integration_test
 
