@@ -3,12 +3,41 @@ use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{any_value::Value, AnyValue, KeyValue},
 };
+use lazy_static::lazy_static;
 use std::collections::HashMap;
+use tracing::warn;
 
 const SERVICE_NAME_KEY: &str = "service.name";
 const HIVE_TARGET_ID_KEY: &str = "hive.target_id";
 
+lazy_static! {
+    static ref MAX_SPAN_SIZE_BYTES: usize = {
+        std::env::var("SPAN_MAX_SIZE_KB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0) // default: no limit
+            * 1024
+    };
+}
+
 pub fn transform_request(request: &ExportTraceServiceRequest, target_id: &str) -> Vec<Span> {
+    transform_request_internal(request, target_id, *MAX_SPAN_SIZE_BYTES)
+}
+
+/// For testing purposes: transform with a custom max span size
+pub fn transform_request_for_test(
+    request: &ExportTraceServiceRequest,
+    target_id: &str,
+    max_span_size_bytes: usize,
+) -> Vec<Span> {
+    transform_request_internal(request, target_id, max_span_size_bytes)
+}
+
+fn transform_request_internal(
+    request: &ExportTraceServiceRequest,
+    target_id: &str,
+    max_span_size_bytes: usize,
+) -> Vec<Span> {
     let mut rows = Vec::new();
 
     for resource_spans in &request.resource_spans {
@@ -34,7 +63,19 @@ pub fn transform_request(request: &ExportTraceServiceRequest, target_id: &str) -
                     &scope_version,
                     target_id,
                 );
-                rows.push(row);
+                let span_size = estimate_span_size(&row);
+                if max_span_size_bytes == 0 || span_size <= max_span_size_bytes {
+                    rows.push(row);
+                } else {
+                    warn!(
+                        trace_id = %row.trace_id,
+                        span_id = %row.span_id,
+                        span_name = %row.span_name,
+                        size_bytes = span_size,
+                        max_size_bytes = max_span_size_bytes,
+                        "Span exceeds max size, dropping"
+                    );
+                }
             }
         }
     }
@@ -208,5 +249,59 @@ fn extract_links(
     }
 
     (trace_ids, span_ids, trace_states, attrs)
+}
+
+fn estimate_span_size(span: &Span) -> usize {
+    let mut size = 0;
+
+    // String fields (approximate)
+    size += span.trace_id.len();
+    size += span.span_id.len();
+    size += span.parent_span_id.len();
+    size += span.trace_state.len();
+    size += span.span_name.len();
+    size += span.span_kind.len();
+    size += span.service_name.len();
+    size += span.scope_name.len();
+    size += span.scope_version.len();
+    size += span.status_code.len();
+    size += span.status_message.len();
+
+    // HashMap entries
+    for (k, v) in &span.resource_attributes {
+        size += k.len() + v.len();
+    }
+    for (k, v) in &span.span_attributes {
+        size += k.len() + v.len();
+    }
+
+    // Arrays: events
+    for name in &span.events_name {
+        size += name.len();
+    }
+    for attrs in &span.events_attributes {
+        for (k, v) in attrs {
+            size += k.len() + v.len();
+        }
+    }
+    size += span.events_timestamp.len() * 8;
+
+    // Arrays: links
+    for id in &span.links_trace_id {
+        size += id.len();
+    }
+    for id in &span.links_span_id {
+        size += id.len();
+    }
+    for state in &span.links_trace_state {
+        size += state.len();
+    }
+    for attrs in &span.links_attributes {
+        for (k, v) in attrs {
+            size += k.len() + v.len();
+        }
+    }
+
+    size
 }
 

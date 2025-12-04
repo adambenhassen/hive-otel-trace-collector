@@ -54,6 +54,7 @@ Environment variables:
 | `BATCH_MAX_SPANS` | `10000` | Max spans per batch |
 | `BATCH_TIMEOUT_MS` | `200` | Batch flush timeout |
 | `BATCH_WORKERS` | `4` | Number of batcher workers |
+| `SPAN_MAX_SIZE_KB` | `0` | Max span size in KB (0 = no limit) |
 | `MEM_BUFFER_SIZE_MB` | auto | Memory buffer limit in MB (default: 90% cgroup or 25% system) |
 | `DISK_BUFFER_ENABLED` | `true` | Enable disk buffer for backpressure |
 | `DISK_BUFFER_DIR` | `/var/lib/otel-collector/buffer` | Disk buffer directory |
@@ -99,6 +100,7 @@ HTTP POST /v1/traces (4318)
         ├─→ Transform
         │   - OTLP spans → ClickHouse row format
         │   - Injects target_id into resource/span attributes
+        │   - Filters spans exceeding SPAN_MAX_SIZE_KB (if enabled)
         │
         ├─→ Decision: Large request? (>1MB)
         │   - Yes → Direct to disk buffer

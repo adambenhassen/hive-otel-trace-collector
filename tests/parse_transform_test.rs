@@ -215,3 +215,100 @@ fn test_transform_hex_trace_id() {
     // trace_id bytes [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] as hex
     assert_eq!(row.trace_id, "0102030405060708090a0b0c0d0e0f10");
 }
+
+#[test]
+fn test_transform_large_span_with_many_attributes() {
+    let large_value = "x".repeat(5000); // 5KB attribute value
+
+    let mut attributes = vec![KeyValue {
+        key: "test.index".to_string(),
+        value: Some(AnyValue {
+            value: Some(Value::IntValue(0)),
+        }),
+    }];
+
+    for i in 0..3 {
+        attributes.push(KeyValue {
+            key: format!("large.attr.{}", i),
+            value: Some(AnyValue {
+                value: Some(Value::StringValue(large_value.clone())),
+            }),
+        });
+    }
+
+    let span = Span {
+        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        span_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        parent_span_id: vec![],
+        trace_state: String::new(),
+        name: "large-span".to_string(),
+        kind: 2,
+        start_time_unix_nano: 1000000000,
+        end_time_unix_nano: 2000000000,
+        attributes,
+        dropped_attributes_count: 0,
+        events: vec![],
+        dropped_events_count: 0,
+        links: vec![],
+        dropped_links_count: 0,
+        status: Some(Status {
+            message: String::new(),
+            code: 1,
+        }),
+        flags: 0,
+    };
+
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("large-service".to_string())),
+                    }),
+                }],
+                dropped_attributes_count: 0,
+                entity_refs: vec![],
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: None,
+                spans: vec![span],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+
+    // Test 1: With no limit (0), large span should be accepted
+    let rows = transform::transform_request_for_test(&request, "target", 0);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].span_name, "large-span");
+    assert_eq!(rows[0].service_name, "large-service");
+    assert!(rows[0].span_attributes.len() >= 4);
+
+    // Test 2: With 1KB limit, this ~15KB span should be dropped
+    let rows = transform::transform_request_for_test(&request, "target", 1 * 1024);
+    assert_eq!(rows.len(), 0, "Large span (15KB+) should be filtered with 1KB limit");
+
+    // Test 3: With 20KB limit, large span should be accepted
+    let rows = transform::transform_request_for_test(&request, "target", 20 * 1024);
+    assert_eq!(rows.len(), 1, "Large span should pass with generous 20KB limit");
+}
+
+#[test]
+fn test_transform_multiple_spans_mixed_sizes() {
+    // Create 100 small spans
+    let request = create_test_otlp_request("mixed-service", "mixed-span", 100);
+
+    // Test 1: With no limit (0), all spans should pass
+    let rows = transform::transform_request_for_test(&request, "target", 0);
+    assert_eq!(rows.len(), 100);
+
+    // Test 2: With 10KB limit, all small spans should still pass
+    let rows = transform::transform_request_for_test(&request, "target", 10 * 1024);
+    assert_eq!(rows.len(), 100);
+
+    // Test 3: With very tight 1 byte limit, all spans should be dropped
+    let rows = transform::transform_request_for_test(&request, "target", 1);
+    assert_eq!(rows.len(), 0, "All spans should be filtered with 1B limit");
+}
