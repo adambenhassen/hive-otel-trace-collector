@@ -22,7 +22,8 @@ use reqwest::Client;
 use std::{env, sync::Arc, time::Duration};
 use tokio::signal;
 use tower_http::trace::TraceLayer;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
 use url::Url;
 
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30); // Request body read timeout
@@ -41,7 +42,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .with_target(false)
         .init();
 

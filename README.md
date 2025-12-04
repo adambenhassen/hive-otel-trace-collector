@@ -15,8 +15,18 @@ A high-performance OpenTelemetry trace collector written in Rust. Ingests OTLP t
 ## Building
 
 ```bash
-# Build release binary
-cargo build --release
+make build          # Debug build
+make build-release  # Release build
+make build-linux    # Cross-compile for Linux
+```
+
+## Testing
+
+```bash
+make test             # Run all tests
+make test-unit        # Unit tests only
+make test-integration # Integration tests (requires Docker)
+make test-e2e         # End-to-end tests (requires Docker)
 ```
 
 ## Configuration
@@ -47,6 +57,7 @@ Environment variables:
 | `DISK_BUFFER_DIR` | `/var/lib/otel-collector/buffer` | Disk buffer directory |
 | `DISK_BUFFER_MAX_SIZE` | `1073741824` | Max buffer size (1GB) |
 | `DISK_BUFFER_SEGMENT_SIZE` | `16777216` | Buffer segment size (16MB) |
+| `RUST_LOG` | `info` | Logging level (e.g., `info`, `debug`) |
 
 ## Endpoints
 
