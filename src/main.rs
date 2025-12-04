@@ -16,6 +16,7 @@ use axum::{
     routing::{any, get},
     Router,
 };
+use bytes::Bytes;
 use diskbuffer::{BufferConfig, BufferedBatch, MmapRingBuffer};
 use pipeline::{Batcher, BatcherConfig, BatcherHandle, ClickHouseConfig, InsertPool};
 use reqwest::Client;
@@ -218,6 +219,11 @@ async fn main() {
 }
 
 async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
+    // Check if under memory backpressure
+    if state.in_backpressure.load(Ordering::Relaxed) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Server under memory backpressure").into_response();
+    }
+    
     let headers = req.headers().clone();
 
     // Detect content type
@@ -259,12 +265,25 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
         }
     };
 
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        process_trace_batch(state_clone, body_bytes, is_json, target_id).await;
+    });
+    StatusCode::OK.into_response()
+}
+
+async fn process_trace_batch(
+    state: Arc<AppState>,
+    body_bytes: Bytes,
+    is_json: bool,
+    target_id: String,
+) {
     // Parse OTLP request
     let request = match proto::otlp::parse(&body_bytes, is_json) {
         Ok(req) => req,
         Err(e) => {
-            warn!("Failed to parse OTLP: {}", e);
-            return (StatusCode::BAD_REQUEST, e).into_response();
+            warn!(target_id = %target_id, "Failed to parse OTLP: {}", e);
+            return;
         }
     };
 
@@ -294,13 +313,10 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
             rows,
             created_at_ns: current_time_nanos(),
         };
-        return match state.disk_buffer.write_batch(batch) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(e) => {
-                error!("Failed to buffer to disk: {}", e);
-                (StatusCode::SERVICE_UNAVAILABLE, "Buffer full").into_response()
-            }
-        };
+        if let Err(e) = state.disk_buffer.write_batch(batch) {
+            error!(target_id = %target_id, error = %e, "Failed to buffer to disk");
+        }
+        return;
     }
 
     // Send to batcher
@@ -311,7 +327,6 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
                 target_id = %target_id,
                 "Processed traces"
             );
-            StatusCode::OK.into_response()
         }
         Err(rows) => {
             // Channel closed (shutdown) try disk buffer
@@ -327,16 +342,11 @@ async fn trace_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -
                     rows,
                     created_at_ns: current_time_nanos(),
                 };
-                match state.disk_buffer.write_batch(batch) {
-                    Ok(()) => StatusCode::OK.into_response(),
-                    Err(e) => {
-                        error!(spans = span_count, error = %e, "Failed to buffer to disk");
-                        (StatusCode::SERVICE_UNAVAILABLE, "Buffer full").into_response()
-                    }
+                if let Err(e) = state.disk_buffer.write_batch(batch) {
+                    error!(spans = span_count, target_id = %target_id, error = %e, "Failed to buffer to disk");
                 }
             } else {
-                error!(spans = span_count, "Channel closed and disk buffer disabled, data lost");
-                (StatusCode::SERVICE_UNAVAILABLE, "Channel closed").into_response()
+                error!(spans = span_count, target_id = %target_id, "Channel closed and disk buffer disabled, data lost");
             }
         }
     }

@@ -25,6 +25,7 @@ pub fn transform_request(request: &ExportTraceServiceRequest, target_id: &str) -
 }
 
 /// For testing purposes: transform with a custom max span size
+#[allow(dead_code)]
 pub fn transform_request_for_test(
     request: &ExportTraceServiceRequest,
     target_id: &str,
