@@ -97,7 +97,7 @@ impl TestContext {
                 .env("CLICKHOUSE_TABLE", "otel_traces")
                 .env("CLICKHOUSE_ASYNC_INSERT", "false")
                 .env("DISABLE_AUTH", "1")
-                .env("BUFFER_DIR", buffer_dir.path())
+                .env("DISK_BUFFER_DIR", buffer_dir.path())
                 .stdout(stdout_file)
                 .stderr(stderr_file)
                 .spawn()

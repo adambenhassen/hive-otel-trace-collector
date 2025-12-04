@@ -67,7 +67,7 @@ async fn main() {
     let buffer_config = BufferConfig::from_env();
     let batcher_config = BatcherConfig::from_env();
 
-    let disk_buffer_enabled = env::var("ENABLE_DISK_BUFFER")
+    let disk_buffer_enabled = env::var("DISK_BUFFER_ENABLED")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
 

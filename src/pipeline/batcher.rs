@@ -40,11 +40,11 @@ impl BatcherConfig {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(200),
             ),
-            channel_capacity: std::env::var("CHANNEL_CAPACITY")
+            channel_capacity: std::env::var("MEM_BUFFER_CAPACITY")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100_000),
-            worker_count: std::env::var("BATCHER_WORKERS")
+            worker_count: std::env::var("BATCH_WORKERS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4),

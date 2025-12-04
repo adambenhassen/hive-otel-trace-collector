@@ -45,14 +45,14 @@ impl Default for BufferConfig {
 impl BufferConfig {
     pub fn from_env() -> Self {
         Self {
-            dir: std::env::var("BUFFER_DIR")
+            dir: std::env::var("DISK_BUFFER_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/var/lib/otel-collector/buffer")),
-            max_size: std::env::var("BUFFER_MAX_SIZE")
+            max_size: std::env::var("DISK_BUFFER_MAX_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10 * 1024 * 1024 * 1024),
-            segment_size: std::env::var("BUFFER_SEGMENT_SIZE")
+            segment_size: std::env::var("DISK_BUFFER_SEGMENT_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(64 * 1024 * 1024),

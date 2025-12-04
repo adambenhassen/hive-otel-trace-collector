@@ -18,7 +18,7 @@ COPY --from=builder /app/target/release/hive-otel-trace-collector /usr/local/bin
 RUN mkdir -p /var/lib/rust-collector
 
 ENV PORT=4318
-ENV BUFFER_DIR=/var/lib/rust-collector
+ENV DISK_BUFFER_DIR=/var/lib/rust-collector
 
 EXPOSE 4318
 

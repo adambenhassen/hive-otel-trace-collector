@@ -28,10 +28,25 @@ Environment variables:
 | `PORT` | `4318` | Main OTLP receiver port |
 | `HEALTH_PORT` | `13133` | Health/profiling server port |
 | `HIVE_OTEL_AUTH_ENDPOINT` | `http://graphql-api:4000/otel-auth` | Auth validation endpoint |
-| `CLICKHOUSE_URL` | - | ClickHouse connection URL |
-| `CLICKHOUSE_DATABASE` | - | Target database |
-| `CLICKHOUSE_TABLE` | - | Target table |
-| `ENABLE_DISK_BUFFER` | `false` | Enable disk buffer for backpressure |
+| `DISABLE_AUTH` | - | Set to disable authentication |
+| `CLICKHOUSE_URL` | `http://clickhouse:8123` | ClickHouse connection URL |
+| `CLICKHOUSE_HOST` | - | ClickHouse host (alternative to URL) |
+| `CLICKHOUSE_PORT` | - | ClickHouse port (alternative to URL) |
+| `CLICKHOUSE_PROTOCOL` | `http` | ClickHouse protocol (http/https) |
+| `CLICKHOUSE_DATABASE` | `default` | Target database |
+| `CLICKHOUSE_TABLE` | `otel_traces` | Target table |
+| `CLICKHOUSE_USERNAME` | `default` | ClickHouse username |
+| `CLICKHOUSE_PASSWORD` | - | ClickHouse password |
+| `CLICKHOUSE_ASYNC_INSERT` | `true` | Enable async inserts |
+| `CLICKHOUSE_WAIT_FOR_ASYNC_INSERT` | `false` | Wait for async insert confirmation |
+| `BATCH_MAX_SIZE` | `10000` | Max spans per batch |
+| `BATCH_TIMEOUT_MS` | `200` | Batch flush timeout |
+| `BATCH_WORKERS` | `4` | Number of batcher workers |
+| `MEM_BUFFER_CAPACITY` | `100000` | Max pending requests in memory before backpressure |
+| `DISK_BUFFER_ENABLED` | `false` | Enable disk buffer for backpressure |
+| `DISK_BUFFER_DIR` | `/var/lib/otel-collector/buffer` | Disk buffer directory |
+| `DISK_BUFFER_MAX_SIZE` | `1073741824` | Max buffer size (1GB) |
+| `DISK_BUFFER_SEGMENT_SIZE` | `16777216` | Buffer segment size (16MB) |
 
 ## Endpoints
 
