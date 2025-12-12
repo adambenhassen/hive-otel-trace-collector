@@ -1,10 +1,14 @@
-pub mod auth;
-pub mod diskbuffer;
-pub mod metrics;
-pub mod pipeline;
-pub mod proto;
+pub mod buffers;
+pub mod config;
+pub mod exporters;
+pub mod utils;
+pub mod processors;
+pub mod receivers;
 
-pub use auth::Authenticator;
-pub use diskbuffer::{BufferConfig, BufferedBatch, MmapRingBuffer};
-pub use pipeline::{Batcher, BatcherConfig, BatcherHandle, ClickHouseConfig, InsertPool};
-pub use proto::span::Span;
+// Re-exports for public API
+pub use buffers::disk::{BufferConfig, BufferedBatch, MmapRingBuffer};
+pub use exporters::clickhouse::{ClickHouseConfig, InsertPool, Batcher, BatcherConfig, BatcherHandle};
+pub use exporters::loki::{LokiClient, LokiConfig, LogBatcher, LogBatcherConfig, LogBatcherHandle};
+pub use processors::{TraceProcessorConfig, process_traces, process_logs};
+pub use receivers::otlp::{Span, Authenticator};
+pub use receivers::vercel::{VercelSignatureVerifier, VercelLogEntry, LokiLogEntry, LokiLabels};

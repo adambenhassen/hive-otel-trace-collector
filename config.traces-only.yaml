@@ -1,0 +1,32 @@
+# Traces-only configuration (no Loki/Vercel)
+
+server:
+  port: 4318
+  health_port: 13133
+
+receivers:
+  otlp:
+    auth_endpoint: "http://graphql-api:4000/otel-auth"
+    # disable_auth: true  # Uncomment for testing
+
+exporters:
+  clickhouse:
+    url: "http://clickhouse:8123"
+    database: "default"
+    table: "otel_traces"
+    async_insert: true
+
+pipelines:
+  traces:
+    receiver: otlp
+    exporter: clickhouse
+    batch:
+      max_size: 10000
+      timeout_ms: 200
+      workers: 4
+    buffers:
+      disk:
+        enabled: true
+        dir: "/var/lib/otel-collector/buffer"
+        max_size_mb: 1024
+        segment_size_mb: 64

@@ -1,4 +1,4 @@
-use crate::proto::span::{bytes_to_hex, Span, SpanKind, StatusCode};
+use super::span::{bytes_to_hex, Span, SpanKind, StatusCode};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{any_value::Value, AnyValue, KeyValue},

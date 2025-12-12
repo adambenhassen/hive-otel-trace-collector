@@ -1,5 +1,5 @@
-use crate::diskbuffer::MmapRingBuffer;
-use crate::pipeline::clickhouse::InsertPool;
+use crate::buffers::disk::MmapRingBuffer;
+use super::InsertPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

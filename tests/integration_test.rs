@@ -2,7 +2,7 @@ mod common;
 
 use common::CREATE_TABLE_SQL;
 use hive_otel_trace_collector::{
-    proto::{otlp, transform},
+    receivers::otlp::{parse, transform},
     ClickHouseConfig, InsertPool, Span,
 };
 use opentelemetry_proto::tonic::{
@@ -365,7 +365,7 @@ async fn test_full_pipeline_json() {
         }]
     }"#;
 
-    let request = otlp::parse(json.as_bytes(), true).expect("Failed to parse JSON");
+    let request = parse::parse(json.as_bytes(), true).expect("Failed to parse JSON");
     let spans = transform::transform_request(&request, "org/project/target");
 
     ctx.insert_pool
@@ -398,7 +398,7 @@ async fn test_full_pipeline_protobuf() {
     let mut buf = Vec::new();
     request.encode(&mut buf).unwrap();
 
-    let parsed = otlp::parse(&buf, false).expect("Failed to parse protobuf");
+    let parsed = parse::parse(&buf, false).expect("Failed to parse protobuf");
     let spans = transform::transform_request(&parsed, "org/project/proto-target");
 
     ctx.insert_pool

@@ -1,0 +1,23 @@
+# Logs-only configuration (no ClickHouse/OTLP)
+
+server:
+  port: 4318
+  health_port: 13133
+
+receivers:
+  vercel:
+    webhook_secret: "test-secret-123"
+
+exporters:
+  loki:
+    url: "http://loki:3100"
+    # tenant_id: "tenant1"  # For multi-tenant Loki
+
+pipelines:
+  logs:
+    receiver: vercel
+    exporter: loki
+    batch:
+      max_size: 5000
+      timeout_ms: 200
+      workers: 2

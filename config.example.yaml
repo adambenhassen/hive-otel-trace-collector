@@ -1,0 +1,60 @@
+# Hive OTEL Collector Configuration
+# Copy to config.yaml and customize
+
+server:
+  port: 4318                  # OTLP receiver port (default: 4318)
+  health_port: 13133          # Health/debug endpoints port (default: 13133)
+
+receivers:
+  # OTLP receiver for traces (Protobuf/JSON)
+  otlp:
+    auth_endpoint: "http://graphql-api:4000/otel-auth"  # Auth validation endpoint
+    disable_auth: false       # Set true to disable auth (default: false)
+
+  # Vercel log drain receiver (NDJSON)
+  vercel:
+    webhook_secret: "${VERCEL_WEBHOOK_SECRET}"  # HMAC-SHA1 secret for signature verification
+
+exporters:
+  # ClickHouse for traces
+  clickhouse:
+    url: "http://clickhouse:8123"   # ClickHouse HTTP URL (required)
+    database: "default"             # Database name (default: "default")
+    table: "otel_traces"            # Table name (default: "otel_traces")
+    username: "default"             # Username (default: "default")
+    password: ""                    # Password (default: "")
+    async_insert: true              # Use async inserts (default: true)
+    wait_for_async_insert: false    # Wait for async insert acknowledgment (default: false)
+
+  # Loki for logs
+  loki:
+    url: "http://loki:3100"         # Loki URL (required)
+    tenant_id: "tenant1"            # X-Scope-OrgID header for multi-tenant Loki (optional)
+    username: ""                    # Basic auth username (optional)
+    password: ""                    # Basic auth password (optional)
+
+pipelines:
+  # Trace pipeline: OTLP -> ClickHouse
+  traces:
+    receiver: otlp                  # Must be "otlp"
+    exporter: clickhouse            # Must be "clickhouse"
+    batch:
+      max_size: 10000               # Flush after N spans (default: 10000)
+      timeout_ms: 200               # Flush after N ms (default: 200)
+      workers: 4                    # Parallel batch workers (default: 4)
+      # mem_buffer_limit_mb: 1024   # Memory limit in MB (default: auto-detect from cgroup/system)
+    buffers:
+      disk:
+        enabled: true               # Enable disk buffer for durability (default: true)
+        dir: "/var/lib/otel-collector/buffer"  # Buffer directory (default: "/var/lib/otel-collector/buffer")
+        max_size_mb: 1024           # Max disk buffer size in MB (default: 1024)
+        segment_size_mb: 64         # Segment file size in MB (default: 64)
+
+  # Log pipeline: Vercel -> Loki
+  logs:
+    receiver: vercel                # Must be "vercel"
+    exporter: loki                  # Must be "loki"
+    batch:
+      max_size: 10000               # Flush after N log entries (default: 10000)
+      timeout_ms: 200               # Flush after N ms (default: 200)
+      workers: 4                    # Parallel batch workers (default: 4)

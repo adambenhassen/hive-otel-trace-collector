@@ -1,4 +1,4 @@
-use hive_otel_trace_collector::proto::{otlp, transform};
+use hive_otel_trace_collector::receivers::otlp::{parse, transform};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{any_value::Value, AnyValue, KeyValue},
@@ -83,7 +83,7 @@ fn test_parse_json_valid() {
         }]
     }"#;
 
-    let result = otlp::parse(json.as_bytes(), true);
+    let result = parse::parse(json.as_bytes(), true);
     assert!(result.is_ok());
 
     let request = result.unwrap();
@@ -94,14 +94,14 @@ fn test_parse_json_valid() {
 #[test]
 fn test_parse_json_invalid() {
     let invalid_json = "not valid json at all";
-    let result = otlp::parse(invalid_json.as_bytes(), true);
+    let result = parse::parse(invalid_json.as_bytes(), true);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_json_empty_spans() {
     let json = r#"{"resourceSpans": []}"#;
-    let result = otlp::parse(json.as_bytes(), true);
+    let result = parse::parse(json.as_bytes(), true);
     assert!(result.is_ok());
     assert_eq!(result.unwrap().resource_spans.len(), 0);
 }
@@ -112,14 +112,14 @@ fn test_parse_protobuf_valid() {
     let mut buf = Vec::new();
     request.encode(&mut buf).unwrap();
 
-    let result = otlp::parse(&buf, false);
+    let result = parse::parse(&buf, false);
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_parse_protobuf_invalid() {
     let invalid_proto = vec![0xff, 0xff, 0xff, 0xff];
-    let result = otlp::parse(&invalid_proto, false);
+    let result = parse::parse(&invalid_proto, false);
     assert!(result.is_err());
 }
 

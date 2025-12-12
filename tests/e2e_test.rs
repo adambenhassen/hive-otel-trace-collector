@@ -87,17 +87,48 @@ impl TestContext {
         let stdout_file = std::fs::File::create(&stdout_path).expect("Failed to create stdout log");
         let stderr_file = std::fs::File::create(&stderr_path).expect("Failed to create stderr log");
 
-        // Start collector
+        // Create config file for the collector
+        let config_path = log_dir.path().join("config.yaml");
+        let config_content = format!(r#"
+server:
+  port: {collector_port}
+  health_port: {health_port}
+
+receivers:
+  otlp:
+    auth_endpoint: ""
+
+exporters:
+  clickhouse:
+    url: "{ch_url}"
+    database: "default"
+    table: "otel_traces"
+    username: "default"
+    password: ""
+    async_insert: false
+
+pipelines:
+  traces:
+    receiver: otlp
+    exporter: clickhouse
+    batch:
+      max_batch_size: 10000
+      timeout_ms: 200
+      workers: 4
+    buffer:
+      enabled: true
+      dir: "{buffer_dir}"
+      max_size_mb: 1024
+      segment_size_mb: 64
+"#, buffer_dir = buffer_dir.path().display());
+        std::fs::write(&config_path, config_content).expect("Failed to write config file");
+
+        // Start collector with config file
         let collector =
             tokio::process::Command::new(env!("CARGO_BIN_EXE_hive-otel-trace-collector"))
-                .env("PORT", collector_port.to_string())
-                .env("HEALTH_PORT", health_port.to_string())
-                .env("CLICKHOUSE_URL", &ch_url)
-                .env("CLICKHOUSE_DATABASE", "default")
-                .env("CLICKHOUSE_TABLE", "otel_traces")
-                .env("CLICKHOUSE_ASYNC_INSERT", "false")
+                .arg("--config")
+                .arg(&config_path)
                 .env("DISABLE_AUTH", "1")
-                .env("DISK_BUFFER_DIR", buffer_dir.path())
                 .stdout(stdout_file)
                 .stderr(stderr_file)
                 .spawn()

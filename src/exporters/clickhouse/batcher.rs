@@ -1,7 +1,7 @@
-use crate::diskbuffer::{BufferedBatch, MmapRingBuffer};
-use crate::metrics::mem_limit::{default_buffer_size_with_source, BufferSizeSource};
-use crate::pipeline::clickhouse::InsertPool;
-use crate::proto::span::Span;
+use crate::buffers::disk::{BufferConfig, BufferedBatch, MmapRingBuffer};
+use crate::utils::limits::{default_buffer_size_with_source, BufferSizeSource};
+use crate::receivers::otlp::Span;
+use super::{ClickHouseConfig, InsertPool};
 use async_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,6 +15,7 @@ pub struct BatcherConfig {
     pub max_batch_timeout: Duration,
     pub worker_count: usize,
     pub mem_buffer_size_bytes: usize,
+    #[allow(dead_code)]
     pub mem_buffer_size_source: BufferSizeSource,
 }
 
@@ -32,6 +33,8 @@ impl Default for BatcherConfig {
 }
 
 impl BatcherConfig {
+    /// Load configuration from environment variables (deprecated, use config file instead)
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         // Check if MEM_BUFFER_SIZE_MB is set in environment
         let (mem_buffer_size_bytes, mem_buffer_size_source) =
@@ -122,23 +125,33 @@ pub struct Batcher {
     config: BatcherConfig,
     receiver: Receiver<Vec<Span>>,
     insert_pool: Arc<InsertPool>,
-    disk_buffer: Arc<MmapRingBuffer>,
+    disk_buffer: Option<Arc<MmapRingBuffer>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
 }
 
 impl Batcher {
-    pub fn new(
-        config: BatcherConfig,
-        insert_pool: Arc<InsertPool>,
-        disk_buffer: Arc<MmapRingBuffer>,
-    ) -> (Self, BatcherHandle) {
+    /// Create a new batcher with the given configs.
+    /// If buffer_config is Some, a disk buffer will be created for failover.
+    pub async fn new(
+        clickhouse_config: ClickHouseConfig,
+        batcher_config: BatcherConfig,
+        buffer_config: Option<BufferConfig>,
+    ) -> Result<(Self, BatcherHandle), super::InsertError> {
         let (sender, receiver) = async_channel::unbounded();
-
         let handle = BatcherHandle { sender };
 
+        let insert_pool = InsertPool::new(clickhouse_config).await?;
+        let insert_pool = Arc::new(insert_pool);
+
+        let disk_buffer = buffer_config.map(|cfg| {
+            let buffer = MmapRingBuffer::new(cfg)
+                .expect("Failed to create disk buffer");
+            Arc::new(buffer)
+        });
+
         let batcher = Self {
-            config,
+            config: batcher_config,
             receiver,
             insert_pool,
             disk_buffer,
@@ -146,19 +159,50 @@ impl Batcher {
             shutdown_notify: Arc::new(Notify::new()),
         };
 
-        (batcher, handle)
+        Ok((batcher, handle))
     }
 
-    pub fn create_drain_worker(&self) -> super::DrainWorker {
+    /// Get a reference to the disk buffer, if configured
+    pub fn disk_buffer(&self) -> Option<Arc<MmapRingBuffer>> {
+        self.disk_buffer.clone()
+    }
+
+    /// Spawn all batcher and drain workers, returning the join handles
+    pub fn spawn_workers(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut handles = Vec::new();
+        let worker_count = self.config.worker_count;
+
+        // Spawn batcher workers
+        for i in 0..worker_count {
+            let batcher = Arc::clone(self);
+            handles.push(tokio::spawn(async move {
+                batcher.run_worker(i).await;
+            }));
+        }
+
+        // Spawn drain workers only if disk buffer is enabled
+        if self.disk_buffer.is_some() {
+            for drain_id in 0..worker_count {
+                let drain_worker = self.create_drain_worker();
+                handles.push(tokio::spawn(async move {
+                    drain_worker.run(drain_id).await;
+                }));
+            }
+        }
+
+        handles
+    }
+
+    fn create_drain_worker(&self) -> super::DrainWorker {
         super::DrainWorker::new(
             Arc::clone(&self.insert_pool),
-            Arc::clone(&self.disk_buffer),
+            Arc::clone(self.disk_buffer.as_ref().expect("drain worker requires disk buffer")),
             Arc::clone(&self.shutdown),
             Arc::clone(&self.shutdown_notify),
         )
     }
 
-    pub async fn run_worker(&self, worker_id: usize) {
+    async fn run_worker(&self, worker_id: usize) {
         info!(worker_id, "Batch worker started");
 
         let mut batch: Vec<Span> = Vec::with_capacity(self.config.max_batch_size);
@@ -224,24 +268,32 @@ impl Batcher {
                 worker_id,
                 error = %e,
                 spans = count,
-                "Clickhouse insert failed, buffering to disk"
+                "Clickhouse insert failed"
             );
 
-            // Buffer to disk
-            let buffered_batch = BufferedBatch {
-                rows,
-                created_at_ns: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            };
+            // Buffer to disk if enabled
+            if let Some(ref disk_buffer) = self.disk_buffer {
+                let buffered_batch = BufferedBatch {
+                    rows,
+                    created_at_ns: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64,
+                };
 
-            if let Err(e) = self.disk_buffer.write_batch(buffered_batch) {
+                if let Err(e) = disk_buffer.write_batch(buffered_batch) {
+                    error!(
+                        worker_id,
+                        error = %e,
+                        spans = count,
+                        "Failed to buffer to disk, data lost!"
+                    );
+                }
+            } else {
                 error!(
                     worker_id,
-                    error = %e,
                     spans = count,
-                    "Failed to buffer to disk, data lost!"
+                    "Clickhouse insert failed and disk buffer disabled, data lost!"
                 );
             }
         }
@@ -250,10 +302,6 @@ impl Batcher {
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
-    }
-
-    pub fn shutdown_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.shutdown_notify)
     }
 
     fn is_shutdown(&self) -> bool {

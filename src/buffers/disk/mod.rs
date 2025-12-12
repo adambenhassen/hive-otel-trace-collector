@@ -1,4 +1,4 @@
-use crate::proto::span::Span;
+use crate::receivers::otlp::span::Span;
 use memmap2::{MmapMut, MmapOptions};
 use std::cell::UnsafeCell;
 use std::fs::{File, OpenOptions};
@@ -28,7 +28,7 @@ impl SharedMmap {
     fn new(mmap: MmapMut, initial_offset: usize) -> Self {
         let len = mmap.len();
         let cell = UnsafeCell::new(mmap);
-        // SAFETY: Extract pointer after UnsafeCell is constructed to ensure the pointer remains valid. 
+        // SAFETY: Extract pointer after UnsafeCell is constructed to ensure the pointer remains valid.
         // MmapMut's backing memory is heap-allocated so moving the struct doesn't invalidate the pointer.
         let ptr = unsafe { (*cell.get()).as_ptr() as *mut u8 };
         Self {
@@ -120,6 +120,8 @@ impl Default for BufferConfig {
 }
 
 impl BufferConfig {
+    /// Load configuration from environment variables (deprecated, use config file instead)
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         let dir = std::env::var("DISK_BUFFER_DIR")
             .map(PathBuf::from)
@@ -684,35 +686,4 @@ impl MmapRingBuffer {
             }
         }
     }
-
-    // /// Compact: remove fully-read segments
-    // pub fn compact(&self) -> Result<usize, BufferError> {
-    //     let mut removed = 0;
-    //     let entries = std::fs::read_dir(&self.config.dir)?;
-
-    //     for entry in entries.flatten() {
-    //         let path = entry.path();
-    //         if path.extension().map(|e| e == "seg").unwrap_or(false) {
-    //             if let Ok(file) = File::open(&path) {
-    //                 if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
-    //                     if mmap.len() >= HEADER_SIZE {
-    //                         let header =
-    //                             unsafe { std::ptr::read(mmap.as_ptr() as *const SegmentHeader) };
-    //                         if header.is_valid() && header.read_offset >= header.write_offset {
-    //                             drop(mmap);
-    //                             drop(file);
-    //                             if std::fs::remove_file(&path).is_ok() {
-    //                                 removed += 1;
-    //                                 info!(path = %path.display(), "Removed empty segment");
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     Ok(removed)
-    // }
 }
-

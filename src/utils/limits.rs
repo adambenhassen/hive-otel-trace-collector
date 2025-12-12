@@ -11,6 +11,7 @@ pub enum MemorySource {
 
 #[derive(Debug, Clone, Copy)]
 pub enum BufferSizeSource {
+    Config,
     Env,
     Cgroup,
     System,
@@ -20,6 +21,7 @@ pub enum BufferSizeSource {
 impl std::fmt::Display for BufferSizeSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            BufferSizeSource::Config => write!(f, "config"),
             BufferSizeSource::Env => write!(f, "env"),
             BufferSizeSource::Cgroup => write!(f, "cgroup"),
             BufferSizeSource::System => write!(f, "system"),

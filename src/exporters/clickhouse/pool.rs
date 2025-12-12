@@ -1,5 +1,5 @@
-use crate::metrics::proc as metrics;
-use crate::proto::span::Span;
+use crate::utils::proc as metrics;
+use crate::receivers::otlp::span::Span;
 use clickhouse::{Client, Compression};
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
@@ -47,6 +47,8 @@ impl Default for ClickHouseConfig {
 }
 
 impl ClickHouseConfig {
+    /// Load configuration from environment variables (deprecated, use config file instead)
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         let url = if let (Ok(host), Ok(port)) = (
             std::env::var("CLICKHOUSE_HOST"),

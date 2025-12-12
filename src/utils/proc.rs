@@ -1,6 +1,8 @@
-use lazy_static::lazy_static;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
+
+use lazy_static::lazy_static;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 static CURRENT_CPU_M: AtomicU64 = AtomicU64::new(0);
@@ -10,7 +12,17 @@ lazy_static! {
     static ref SYSTEM: Mutex<System> = Mutex::new(System::new());
 }
 
-pub fn update_process_metrics() {
+/// Spawns a background task that updates process metrics every 100ms.
+pub fn spawn_metrics_task() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            update_process_metrics();
+        }
+    })
+}
+
+fn update_process_metrics() {
     let pid = Pid::from_u32(std::process::id());
 
     if let Ok(mut sys) = SYSTEM.lock() {
