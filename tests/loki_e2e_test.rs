@@ -45,7 +45,7 @@ impl Drop for TestContext {
 impl TestContext {
     async fn new() -> Self {
         // Start Loki
-        let loki = GenericImage::new("grafana/loki", "3.0.0")
+        let loki = GenericImage::new("grafana/loki", "latest")
             .with_exposed_port(3100.into())
             .with_wait_for(testcontainers::core::WaitFor::message_on_stderr("Loki started"))
             .start()

@@ -2,10 +2,12 @@ use bytes::Bytes;
 use tracing::{debug, error};
 
 use crate::exporters::loki::{transform::parse_ndjson, LogBatcherHandle};
+use crate::exporters::kafka::{transform::from_loki_entries, KafkaLogBatcherHandle};
 
-/// Process logs: parse and route to log batcher
+/// Process logs: parse and route to configured exporters (Loki, Kafka, or both)
 pub async fn process_logs(
-    log_handle: LogBatcherHandle,
+    loki_handle: Option<LogBatcherHandle>,
+    kafka_handle: Option<KafkaLogBatcherHandle>,
     body: Bytes,
     target_id: String,
 ) {
@@ -17,22 +19,44 @@ pub async fn process_logs(
         return;
     }
 
-    // Send to log batcher
-    match log_handle.send(logs) {
-        Ok(()) => {
-            debug!(
-                logs = log_count,
-                target_id = %target_id,
-                "Processed Vercel logs"
-            );
+    // Send to Loki if configured
+    if let Some(handle) = loki_handle {
+        match handle.send(logs.clone()) {
+            Ok(()) => {
+                debug!(
+                    logs = log_count,
+                    target_id = %target_id,
+                    "Sent logs to Loki batcher"
+                );
+            }
+            Err(_logs) => {
+                error!(
+                    logs = _logs.len(),
+                    target_id = %target_id,
+                    "Loki batcher channel closed, logs lost"
+                );
+            }
         }
-        Err(_logs) => {
-            let log_count = _logs.len();
-            error!(
-                logs = log_count,
-                target_id = %target_id,
-                "Log batcher channel closed, logs lost"
-            );
+    }
+
+    // Send to Kafka if configured
+    if let Some(handle) = kafka_handle {
+        let kafka_logs = from_loki_entries(&logs);
+        match handle.send(kafka_logs) {
+            Ok(()) => {
+                debug!(
+                    logs = log_count,
+                    target_id = %target_id,
+                    "Sent logs to Kafka batcher"
+                );
+            }
+            Err(_logs) => {
+                error!(
+                    logs = _logs.len(),
+                    target_id = %target_id,
+                    "Kafka batcher channel closed, logs lost"
+                );
+            }
         }
     }
 }

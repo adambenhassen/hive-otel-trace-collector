@@ -1,10 +1,12 @@
 use crate::config::Config;
 use super::clickhouse::ClickHouseExporter;
 use super::loki::LokiExporter;
+use super::kafka::KafkaExporter;
 
 pub struct Exporters {
     pub clickhouse: Option<ClickHouseExporter>,
     pub loki: Option<LokiExporter>,
+    pub kafka: Option<KafkaExporter>,
 }
 
 impl Exporters {
@@ -21,7 +23,12 @@ impl Exporters {
             exporter
         });
 
-        (Self { clickhouse, loki }, handles)
+        let kafka = KafkaExporter::try_init(config).map(|(exporter, h)| {
+            handles.extend(h);
+            exporter
+        });
+
+        (Self { clickhouse, loki, kafka }, handles)
     }
 
     pub fn shutdown(&self) {
@@ -30,6 +37,9 @@ impl Exporters {
         }
         if let Some(ref lk) = self.loki {
             lk.batcher.shutdown();
+        }
+        if let Some(ref kf) = self.kafka {
+            kf.batcher.shutdown();
         }
     }
 }

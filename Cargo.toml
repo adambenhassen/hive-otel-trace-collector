@@ -39,6 +39,8 @@ sha1 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 subtle = "2"
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+futures = "0.3"
 
 [profile.release]
 opt-level = 3
@@ -52,7 +54,7 @@ tokio-test = "0.4"
 wiremock = "0.6"
 axum-test = "16"
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["clickhouse"] }
+testcontainers-modules = { version = "0.11", features = ["clickhouse", "kafka"] }
 portpicker = "0.1"
 rand = "0.8"
 libc = "0.2"

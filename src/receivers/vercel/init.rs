@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::exporters::loki::LokiExporter;
+use crate::exporters::kafka::KafkaExporter;
 use super::{vercel_log_handler, VercelHandlerState, VercelSignatureVerifier};
 
 pub struct VercelReceiver;
@@ -12,8 +13,14 @@ pub struct VercelReceiver;
 impl VercelReceiver {
     pub fn try_init(
         config: &Config,
-        loki: &LokiExporter,
+        loki: Option<&LokiExporter>,
+        kafka: Option<&KafkaExporter>,
     ) -> Option<Router> {
+        // Require at least one exporter
+        if loki.is_none() && kafka.is_none() {
+            return None;
+        }
+
         let vercel_config = config.receivers.vercel.as_ref()?;
 
         let vercel_verifier = VercelSignatureVerifier::new(
@@ -22,10 +29,15 @@ impl VercelReceiver {
 
         let state = Arc::new(VercelHandlerState {
             vercel_verifier,
-            log_batcher_handle: loki.handle.clone(),
+            loki_handle: loki.map(|l| l.handle.clone()),
+            kafka_handle: kafka.map(|k| k.handle.clone()),
         });
 
-        info!("Vercel receiver initialized");
+        info!(
+            loki_enabled = loki.is_some(),
+            kafka_enabled = kafka.is_some(),
+            "Vercel receiver initialized"
+        );
 
         Some(Router::new()
             .route("/v1/logs/vercel", post(vercel_log_handler))

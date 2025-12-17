@@ -8,6 +8,7 @@ use axum::{
 use bytes::Bytes;
 
 use crate::exporters::loki::LogBatcherHandle;
+use crate::exporters::kafka::KafkaLogBatcherHandle;
 use crate::processors::process_logs;
 
 use super::VercelSignatureVerifier;
@@ -15,7 +16,8 @@ use super::VercelSignatureVerifier;
 /// State required by the Vercel log handler
 pub struct VercelHandlerState {
     pub vercel_verifier: VercelSignatureVerifier,
-    pub log_batcher_handle: LogBatcherHandle,
+    pub loki_handle: Option<LogBatcherHandle>,
+    pub kafka_handle: Option<KafkaLogBatcherHandle>,
 }
 
 pub async fn vercel_log_handler(
@@ -48,9 +50,10 @@ pub async fn vercel_log_handler(
     };
 
     // Spawn async processing (fast response)
-    let log_handle_clone = state.log_batcher_handle.clone();
+    let loki_handle = state.loki_handle.clone();
+    let kafka_handle = state.kafka_handle.clone();
     tokio::spawn(async move {
-        process_logs(log_handle_clone, body, target_id).await;
+        process_logs(loki_handle, kafka_handle, body, target_id).await;
     });
 
     StatusCode::OK.into_response()

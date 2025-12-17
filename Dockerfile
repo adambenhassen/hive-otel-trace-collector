@@ -2,7 +2,13 @@ FROM rust:1.91-slim-bookworm AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential && rm -rf /var/lib/apt/lists/*
+# Install build dependencies including cmake for rdkafka
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    build-essential \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 COPY src src
@@ -15,11 +21,14 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 COPY --from=builder /app/target/release/hive-otel-trace-collector /usr/local/bin/hive-otel-trace-collector
 
-RUN mkdir -p /var/lib/rust-collector
+COPY config.*.yaml /etc/otel/
+
+RUN mkdir -p /var/lib/otel-collector/buffer
 
 ENV PORT=4318
-ENV DISK_BUFFER_DIR=/var/lib/rust-collector
+ENV HEALTH_PORT=13133
+ENV CONFIG_FILE=/etc/otel/config.yaml
 
-EXPOSE 4318
+EXPOSE 4318 13133
 
-CMD ["hive-otel-trace-collector"]
+CMD ["sh", "-c", "hive-otel-trace-collector --config ${CONFIG_FILE}"]
