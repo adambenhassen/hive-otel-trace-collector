@@ -7,12 +7,6 @@ use tracing::info;
 use crate::buffers::disk::BufferConfig as DiskBufferConfig;
 use crate::exporters::clickhouse::{ClickHouseConfig as CHRuntimeConfig, BatcherConfig};
 use crate::exporters::loki::{LokiConfig as LokiRuntimeConfig, LogBatcherConfig};
-use crate::exporters::kafka::{
-    KafkaConfig as KafkaRuntimeConfig,
-    KafkaLogBatcherConfig,
-    TopicStrategy,
-    SerializationFormat,
-};
 use crate::utils::limits::{default_buffer_size_with_source, BufferSizeSource};
 
 #[derive(Error, Debug)]
@@ -101,9 +95,6 @@ pub struct ExportersConfig {
 
     #[serde(default)]
     pub loki: Option<LokiExporterConfig>,
-
-    #[serde(default)]
-    pub kafka: Option<KafkaExporterConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,99 +168,6 @@ pub struct LokiExporterConfig {
 
     #[serde(default)]
     pub password: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct KafkaExporterConfig {
-    pub bootstrap_servers: String,
-
-    pub topic: String,
-
-    #[serde(default = "default_topic_strategy")]
-    pub topic_strategy: String,
-
-    #[serde(default = "default_topic_prefix")]
-    pub topic_prefix: String,
-
-    #[serde(default = "default_serialization")]
-    pub serialization: String,
-
-    #[serde(default = "default_acks")]
-    pub acks: String,
-
-    #[serde(default = "default_compression")]
-    pub compression: String,
-
-    #[serde(default = "default_kafka_batch_size")]
-    pub batch_size: usize,
-
-    #[serde(default = "default_linger_ms")]
-    pub linger_ms: u64,
-
-    #[serde(default = "default_request_timeout_ms")]
-    pub request_timeout_ms: u64,
-
-    #[serde(default = "default_delivery_timeout_ms")]
-    pub delivery_timeout_ms: u64,
-
-    #[serde(default = "default_retries")]
-    pub retries: u32,
-
-    #[serde(default = "default_security_protocol")]
-    pub security_protocol: String,
-
-    #[serde(default)]
-    pub sasl_mechanism: Option<String>,
-
-    #[serde(default)]
-    pub sasl_username: Option<String>,
-
-    #[serde(default)]
-    pub sasl_password: Option<String>,
-}
-
-fn default_topic_strategy() -> String {
-    "single".to_string()
-}
-
-fn default_topic_prefix() -> String {
-    "logs-".to_string()
-}
-
-fn default_serialization() -> String {
-    "json".to_string()
-}
-
-fn default_acks() -> String {
-    "1".to_string()
-}
-
-fn default_compression() -> String {
-    "lz4".to_string()
-}
-
-fn default_kafka_batch_size() -> usize {
-    16384
-}
-
-fn default_linger_ms() -> u64 {
-    5
-}
-
-fn default_request_timeout_ms() -> u64 {
-    30000
-}
-
-fn default_delivery_timeout_ms() -> u64 {
-    120000
-}
-
-fn default_retries() -> u32 {
-    3
-}
-
-fn default_security_protocol() -> String {
-    "plaintext".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -431,40 +329,6 @@ impl LokiExporterConfig {
     }
 }
 
-impl KafkaExporterConfig {
-    /// Convert to runtime KafkaConfig
-    pub fn to_runtime_config(&self) -> KafkaRuntimeConfig {
-        let topic_strategy = match self.topic_strategy.as_str() {
-            "per_tenant" => TopicStrategy::PerTenant,
-            _ => TopicStrategy::Single,
-        };
-
-        let serialization = match self.serialization.as_str() {
-            "protobuf" => SerializationFormat::Protobuf,
-            _ => SerializationFormat::Json,
-        };
-
-        KafkaRuntimeConfig {
-            bootstrap_servers: self.bootstrap_servers.clone(),
-            topic: self.topic.clone(),
-            topic_strategy,
-            topic_prefix: self.topic_prefix.clone(),
-            serialization,
-            acks: self.acks.clone(),
-            compression: self.compression.clone(),
-            batch_size: self.batch_size,
-            linger_ms: self.linger_ms,
-            request_timeout_ms: self.request_timeout_ms,
-            delivery_timeout_ms: self.delivery_timeout_ms,
-            retries: self.retries,
-            security_protocol: self.security_protocol.clone(),
-            sasl_mechanism: self.sasl_mechanism.clone(),
-            sasl_username: self.sasl_username.clone(),
-            sasl_password: self.sasl_password.clone(),
-        }
-    }
-}
-
 impl BatchConfig {
     /// Convert to runtime BatcherConfig for trace pipeline
     pub fn to_batcher_config(&self) -> BatcherConfig {
@@ -484,15 +348,6 @@ impl BatchConfig {
     /// Convert to runtime LogBatcherConfig for log pipeline
     pub fn to_log_batcher_config(&self) -> LogBatcherConfig {
         LogBatcherConfig {
-            max_batch_size: self.max_size,
-            max_batch_timeout: Duration::from_millis(self.timeout_ms),
-            worker_count: self.workers,
-        }
-    }
-
-    /// Convert to runtime KafkaLogBatcherConfig for Kafka log pipeline
-    pub fn to_kafka_log_batcher_config(&self) -> KafkaLogBatcherConfig {
-        KafkaLogBatcherConfig {
             max_batch_size: self.max_size,
             max_batch_timeout: Duration::from_millis(self.timeout_ms),
             worker_count: self.workers,
@@ -559,9 +414,9 @@ impl Config {
                     logs.receiver
                 )));
             }
-            if logs.exporter != "loki" && logs.exporter != "kafka" {
+            if logs.exporter != "loki" {
                 return Err(ConfigError::Validation(format!(
-                    "Unknown log exporter: {}. Must be 'loki' or 'kafka'",
+                    "Unknown log exporter: {}. Must be 'loki'",
                     logs.exporter
                 )));
             }
@@ -570,10 +425,9 @@ impl Config {
                     "Log pipeline requires vercel receiver config".to_string(),
                 ));
             }
-            // Require at least one log exporter configured
-            if self.exporters.loki.is_none() && self.exporters.kafka.is_none() {
+            if self.exporters.loki.is_none() {
                 return Err(ConfigError::Validation(
-                    "Log pipeline requires loki or kafka exporter config".to_string(),
+                    "Log pipeline requires loki exporter config".to_string(),
                 ));
             }
         }
@@ -609,12 +463,6 @@ impl Config {
             info!("Log pipeline: {} -> {}", logs.receiver, logs.exporter);
             if let Some(ref loki) = self.exporters.loki {
                 info!("  Loki: {}", loki.url);
-            }
-            if let Some(ref kafka) = self.exporters.kafka {
-                info!(
-                    "  Kafka: {} (topic: {}, strategy: {})",
-                    kafka.bootstrap_servers, kafka.topic, kafka.topic_strategy
-                );
             }
             info!(
                 "  Batch: size={}, timeout={}ms, workers={}",

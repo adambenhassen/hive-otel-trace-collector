@@ -157,7 +157,7 @@ pipelines:
     fn compute_signature(&self, body: &[u8]) -> String {
         let mut mac = HmacSha1::new_from_slice(WEBHOOK_SECRET.as_bytes()).unwrap();
         mac.update(body);
-        format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
+        hex::encode(mac.finalize().into_bytes())
     }
 
     async fn send_vercel_logs(&self, body: &str) -> reqwest::Response {
@@ -298,7 +298,7 @@ async fn test_vercel_invalid_signature() {
         .http_client
         .post(&ctx.logs_url)
         .header("Content-Type", "application/x-ndjson")
-        .header("X-Vercel-Signature", "sha1=invalid")
+        .header("X-Vercel-Signature", "invalid")
         .header("X-Hive-Target-Ref", "org/project/target")
         .body(log_entry)
         .send()
@@ -368,5 +368,4 @@ async fn test_vercel_labels_preserved() {
     assert_eq!(stream["source"], "lambda");
     assert_eq!(stream["log_type"], "stdout");
     assert_eq!(stream["level"], "info");
-    assert_eq!(stream["target_id"], "org/project/target");
 }

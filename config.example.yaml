@@ -13,7 +13,7 @@ receivers:
 
   # Vercel log drain receiver (NDJSON)
   vercel:
-    webhook_secret: "${VERCEL_WEBHOOK_SECRET}"  # HMAC-SHA1 secret for signature verification
+    webhook_secret: "changeme"  # HMAC-SHA1 secret for signature verification
 
 exporters:
   # ClickHouse for traces
@@ -29,7 +29,6 @@ exporters:
   # Loki for logs
   loki:
     url: "http://loki:3100"         # Loki URL (required)
-    tenant_id: "tenant1"            # X-Scope-OrgID header for multi-tenant Loki (optional)
     username: ""                    # Basic auth username (optional)
     password: ""                    # Basic auth password (optional)
 

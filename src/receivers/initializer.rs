@@ -35,15 +35,12 @@ impl Receivers {
             }
         }
 
-        // Initialize Vercel receiver if configured (requires Loki or Kafka exporter)
-        if exporters.loki.is_some() || exporters.kafka.is_some() {
-            if let Some(router) = VercelReceiver::try_init(
-                config,
-                exporters.loki.as_ref(),
-                exporters.kafka.as_ref(),
-            ) {
-                app = app.merge(router);
-            }
+        // Initialize Vercel receiver if configured (requires Loki exporter)
+        if let Some(router) = VercelReceiver::try_init(
+            config,
+            exporters.loki.as_ref(),
+        ) {
+            app = app.merge(router);
         }
 
         app

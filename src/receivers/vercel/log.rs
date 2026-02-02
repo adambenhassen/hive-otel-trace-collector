@@ -10,16 +10,17 @@ pub struct VercelLogEntry {
     pub id: String,
 
     /// Log message content
-    pub message: String,
+    #[serde(default)]
+    pub message: Option<String>,
 
     /// Unix timestamp in milliseconds
     pub timestamp: i64,
 
     /// Log type: "stdout", "stderr", "request", "edge-request", etc.
-    #[serde(rename = "type")]
-    pub log_type: String,
+    #[serde(rename = "type", default)]
+    pub log_type: Option<String>,
 
-    /// Source: "build", "static", "lambda", "edge"
+    /// Source: "build", "static", "lambda", "edge", "external"
     pub source: String,
 
     /// Vercel project ID
@@ -133,9 +134,6 @@ pub struct LokiLabels {
 
     /// Log level: "info", "warn", "error"
     pub level: String,
-
-    /// Hive tenant identifier
-    pub target_id: String,
 }
 
 impl LokiLabels {
@@ -146,7 +144,6 @@ impl LokiLabels {
         map.insert("source".to_string(), self.source.clone());
         map.insert("log_type".to_string(), self.log_type.clone());
         map.insert("level".to_string(), self.level.clone());
-        map.insert("target_id".to_string(), self.target_id.clone());
         map
     }
 }
@@ -173,9 +170,9 @@ mod tests {
 
         let entry: VercelLogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.id, "log_123");
-        assert_eq!(entry.message, "Hello world");
+        assert_eq!(entry.message, Some("Hello world".to_string()));
         assert_eq!(entry.timestamp, 1702400000000);
-        assert_eq!(entry.log_type, "stdout");
+        assert_eq!(entry.log_type, Some("stdout".to_string()));
         assert_eq!(entry.source, "lambda");
         assert_eq!(entry.project_id, "prj_abc");
         assert_eq!(entry.deployment_id, "dpl_xyz");
@@ -199,7 +196,7 @@ mod tests {
 
         let entry: VercelLogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.id, "log_123");
-        assert_eq!(entry.log_type, "stderr");
+        assert_eq!(entry.log_type, Some("stderr".to_string()));
         assert_eq!(entry.source, "build");
         assert!(entry.request_id.is_none());
         assert!(entry.status_code.is_none());
@@ -212,7 +209,6 @@ mod tests {
             source: "lambda".to_string(),
             log_type: "stdout".to_string(),
             level: "info".to_string(),
-            target_id: "tenant_123".to_string(),
         };
 
         let map = labels.to_hashmap();
@@ -220,6 +216,5 @@ mod tests {
         assert_eq!(map.get("source"), Some(&"lambda".to_string()));
         assert_eq!(map.get("log_type"), Some(&"stdout".to_string()));
         assert_eq!(map.get("level"), Some(&"info".to_string()));
-        assert_eq!(map.get("target_id"), Some(&"tenant_123".to_string()));
     }
 }

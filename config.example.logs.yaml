@@ -1,4 +1,4 @@
-# Logs-only configuration (no ClickHouse/OTLP)
+# Logs-only configuration
 
 server:
   port: 4318
@@ -11,13 +11,12 @@ receivers:
 exporters:
   loki:
     url: "http://loki:3100"
-    # tenant_id: "tenant1"  # For multi-tenant Loki
 
 pipelines:
   logs:
     receiver: vercel
     exporter: loki
     batch:
-      max_size: 5000
-      timeout_ms: 200
-      workers: 2
+      max_size: 5000              # Flush after N log entries
+      timeout_ms: 500             # Flush after N ms  
+      workers: 2                  # Parallel batch workers  

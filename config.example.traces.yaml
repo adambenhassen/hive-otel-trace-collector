@@ -1,4 +1,4 @@
-# Traces-only configuration (no Loki/Vercel)
+# Traces-only configuration
 
 server:
   port: 4318

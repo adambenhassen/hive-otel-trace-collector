@@ -166,13 +166,22 @@ impl LogBatcher {
         let count = batch.len();
         let logs = std::mem::take(batch);
 
-        if let Err(e) = self.loki_client.push(&logs).await {
-            error!(
-                worker_id,
-                error = %e,
-                logs = count,
-                "Loki push failed, logs lost"
-            );
+        let start = Instant::now();
+        match self.loki_client.push(&logs).await {
+            Ok(()) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                info!(worker_id, logs = count, elapsed_ms, "Pushed logs to Loki");
+            }
+            Err(e) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                error!(
+                    worker_id,
+                    error = %e,
+                    logs = count,
+                    elapsed_ms,
+                    "Loki push failed, logs lost"
+                );
+            }
         }
     }
 

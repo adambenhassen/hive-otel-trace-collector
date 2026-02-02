@@ -23,10 +23,14 @@ pub struct LokiStream {
 /// - Extracts low-cardinality fields as labels
 /// - Serializes full log content as JSON line
 /// - Converts timestamp from ms to ns
-pub fn transform_vercel_to_loki(vercel_log: &VercelLogEntry, target_id: &str) -> LokiLogEntry {
+pub fn transform_vercel_to_loki(vercel_log: &VercelLogEntry) -> LokiLogEntry {
+    // Default log_type based on source if not present
+    let log_type = vercel_log.log_type.clone()
+        .unwrap_or_else(|| vercel_log.source.clone());
+
     // Derive level if not present
     let level = vercel_log.level.clone().unwrap_or_else(|| {
-        match vercel_log.log_type.as_str() {
+        match log_type.as_str() {
             "stderr" => "error".to_string(),
             _ => "info".to_string(),
         }
@@ -35,9 +39,8 @@ pub fn transform_vercel_to_loki(vercel_log: &VercelLogEntry, target_id: &str) ->
     let labels = LokiLabels {
         project_id: vercel_log.project_id.clone(),
         source: vercel_log.source.clone(),
-        log_type: vercel_log.log_type.clone(),
+        log_type,
         level,
-        target_id: target_id.to_string(),
     };
 
     // Convert timestamp from ms to ns
@@ -94,13 +97,13 @@ pub fn group_logs_for_push(logs: &[LokiLogEntry]) -> LokiPushRequest {
 /// Parse NDJSON body into Vercel log entries.
 ///
 /// Skips invalid lines instead of failing the entire batch.
-pub fn parse_ndjson(body: &[u8], target_id: &str) -> Vec<LokiLogEntry> {
+pub fn parse_ndjson(body: &[u8]) -> Vec<LokiLogEntry> {
     body.split(|&b| b == b'\n')
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
             serde_json::from_slice::<VercelLogEntry>(line)
                 .ok()
-                .map(|v| transform_vercel_to_loki(&v, target_id))
+                .map(|v| transform_vercel_to_loki(&v))
         })
         .collect()
 }
@@ -112,9 +115,9 @@ mod tests {
     fn make_vercel_log() -> VercelLogEntry {
         VercelLogEntry {
             id: "log_123".to_string(),
-            message: "Hello world".to_string(),
+            message: Some("Hello world".to_string()),
             timestamp: 1702400000000,
-            log_type: "stdout".to_string(),
+            log_type: Some("stdout".to_string()),
             source: "lambda".to_string(),
             project_id: "prj_abc".to_string(),
             project_name: Some("my-app".to_string()),
@@ -136,14 +139,13 @@ mod tests {
     #[test]
     fn test_transform_vercel_to_loki() {
         let vercel_log = make_vercel_log();
-        let loki_entry = transform_vercel_to_loki(&vercel_log, "tenant_123");
+        let loki_entry = transform_vercel_to_loki(&vercel_log);
 
         assert_eq!(loki_entry.timestamp_ns, 1702400000000 * 1_000_000);
         assert_eq!(loki_entry.labels.project_id, "prj_abc");
         assert_eq!(loki_entry.labels.source, "lambda");
         assert_eq!(loki_entry.labels.log_type, "stdout");
         assert_eq!(loki_entry.labels.level, "info");
-        assert_eq!(loki_entry.labels.target_id, "tenant_123");
 
         // Verify log line is valid JSON
         let line_json: serde_json::Value = serde_json::from_str(&loki_entry.line).unwrap();
@@ -154,10 +156,10 @@ mod tests {
     #[test]
     fn test_level_derived_from_stderr() {
         let mut vercel_log = make_vercel_log();
-        vercel_log.log_type = "stderr".to_string();
+        vercel_log.log_type = Some("stderr".to_string());
         vercel_log.level = None;
 
-        let loki_entry = transform_vercel_to_loki(&vercel_log, "tenant_123");
+        let loki_entry = transform_vercel_to_loki(&vercel_log);
         assert_eq!(loki_entry.labels.level, "error");
     }
 
@@ -166,7 +168,7 @@ mod tests {
         let mut vercel_log = make_vercel_log();
         vercel_log.level = Some("warn".to_string());
 
-        let loki_entry = transform_vercel_to_loki(&vercel_log, "tenant_123");
+        let loki_entry = transform_vercel_to_loki(&vercel_log);
         assert_eq!(loki_entry.labels.level, "warn");
     }
 
@@ -181,7 +183,6 @@ mod tests {
                     source: "lambda".to_string(),
                     log_type: "stdout".to_string(),
                     level: "info".to_string(),
-                    target_id: "tenant_1".to_string(),
                 },
             },
             LokiLogEntry {
@@ -192,7 +193,6 @@ mod tests {
                     source: "lambda".to_string(),
                     log_type: "stdout".to_string(),
                     level: "info".to_string(),
-                    target_id: "tenant_1".to_string(),
                 },
             },
             LokiLogEntry {
@@ -203,7 +203,6 @@ mod tests {
                     source: "edge".to_string(),
                     log_type: "stderr".to_string(),
                     level: "error".to_string(),
-                    target_id: "tenant_1".to_string(),
                 },
             },
         ];
@@ -237,7 +236,7 @@ mod tests {
 invalid json line
 {"id":"3","message":"c","timestamp":3000,"type":"stdout","source":"build","projectId":"prj","deploymentId":"dpl"}"#;
 
-        let logs = parse_ndjson(ndjson.as_bytes(), "tenant_1");
+        let logs = parse_ndjson(ndjson.as_bytes());
 
         // Should parse 3 valid lines, skip the invalid one
         assert_eq!(logs.len(), 3);
@@ -248,7 +247,7 @@ invalid json line
 
     #[test]
     fn test_parse_ndjson_empty() {
-        let logs = parse_ndjson(b"", "tenant_1");
+        let logs = parse_ndjson(b"");
         assert!(logs.is_empty());
     }
 }

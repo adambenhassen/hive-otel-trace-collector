@@ -6,9 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use tracing::debug;
 
 use crate::exporters::loki::LogBatcherHandle;
-use crate::exporters::kafka::KafkaLogBatcherHandle;
 use crate::processors::process_logs;
 
 use super::VercelSignatureVerifier;
@@ -17,7 +17,6 @@ use super::VercelSignatureVerifier;
 pub struct VercelHandlerState {
     pub vercel_verifier: VercelSignatureVerifier,
     pub loki_handle: Option<LogBatcherHandle>,
-    pub kafka_handle: Option<KafkaLogBatcherHandle>,
 }
 
 pub async fn vercel_log_handler(
@@ -39,21 +38,12 @@ pub async fn vercel_log_handler(
     if !state.vercel_verifier.verify(signature, &body) {
         return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
     }
-
-    // Extract target_id from X-Hive-Target-Ref header
-    let target_id = match headers.get("x-hive-target-ref") {
-        Some(id) => match id.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid target ref header").into_response(),
-        },
-        None => return (StatusCode::BAD_REQUEST, "Missing X-Hive-Target-Ref").into_response(),
-    };
+    debug!(payload = %String::from_utf8_lossy(&body), "Received Vercel payload");
 
     // Spawn async processing (fast response)
     let loki_handle = state.loki_handle.clone();
-    let kafka_handle = state.kafka_handle.clone();
     tokio::spawn(async move {
-        process_logs(loki_handle, kafka_handle, body, target_id).await;
+        process_logs(loki_handle, body).await;
     });
 
     StatusCode::OK.into_response()
